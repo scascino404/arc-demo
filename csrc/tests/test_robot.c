@@ -125,32 +125,31 @@ static void test_determinism(void)
     arc_sim_destroy(b);
 }
 
-/* A ball thrown at the boundary wall must stay inside the terrain. */
-static void test_walls(void)
+/* A ball rolled over the edge of the terrain falls into the void. */
+static void test_void(void)
 {
     arc_world w;
     arc_rng rng;
     double r = 0.1, edge;
-    printf("boundary walls\n");
+    int i;
+    printf("void around the terrain\n");
     arc_world_init(&w);
     arc_rng_seed(&rng, 9);
     arc_terrain_generate(&w.terrain, 32, 0.4, 0.5, &rng);
     edge = w.terrain.ox + w.terrain.nx * w.terrain.cell;
     arc_add_body(&w, 1.0, arc_inertia_sphere(1.0, r), v3(edge - 1.0, 0.0, 1.0), q_identity());
     arc_add_sphere(&w, 0, v3(0, 0, 0), r);
-    w.bodies[0].v = v3(8.0, 0.0, 0.0);
-    {
-        int i;
-        for (i = 0; i < 90; ++i)
-            arc_world_step(&w, DT, SUBSTEPS);
-    }
-    check(w.terrain.outside > 0.9, "wall above the terrain (m)", w.terrain.outside, 0.9);
-    check_below("ball stays inside (x - edge, m)", w.bodies[0].x.x + r - edge, 1e-3);
+    w.bodies[0].v = v3(4.0, 0.0, 0.0);
+    for (i = 0; i < 90; ++i)
+        arc_world_step(&w, DT, SUBSTEPS);
+    check(w.terrain.outside < -10.0, "void below the terrain (m)", w.terrain.outside, -10.0);
+    check(w.bodies[0].x.x > edge, "ball past the edge (x - edge, m)", w.bodies[0].x.x - edge, 0.0);
+    check_below("ball falls (z, m)", w.bodies[0].x.z, -2.0);
 }
 
 int main(void)
 {
-    test_walls();
+    test_void();
     test_stand();
     test_random();
     test_determinism();

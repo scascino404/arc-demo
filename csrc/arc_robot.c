@@ -35,16 +35,29 @@
 #define KD 6.0
 #define MAX_TORQUE 80.0
 
-static const float HULL[3] = { 0.20f, 0.20f, 0.21f };
-static const float DARK[3] = { 0.09f, 0.09f, 0.10f };
-static const float STEEL[3] = { 0.42f, 0.42f, 0.44f };
-static const float GLOW[3] = { 1.00f, 0.16f, 0.10f };
-static const float DIM_GLOW[3] = { 0.62f, 0.07f, 0.05f };
+/* colors (sRGB) */
+static const float ARMOR[3] = { 0.40f, 0.41f, 0.43f };
+static const float HULL[3] = { 0.34f, 0.345f, 0.36f };
+static const float DARK[3] = { 0.17f, 0.17f, 0.18f };
+static const float STEEL[3] = { 0.52f, 0.53f, 0.55f };
+static const float BEZEL[3] = { 0.72f, 0.73f, 0.74f };
+static const float CABLE[3] = { 0.30f, 0.30f, 0.31f };
+static const float BLACK[3] = { 0.06f, 0.06f, 0.065f };
+static const float GLOW[3] = { 1.00f, 0.10f, 0.06f };
+static const float DIM_GLOW[3] = { 0.62f, 0.05f, 0.03f };
 
-static void visual(arc_world *w, int type, int body, vec3 p0, vec3 p1, double r, double r2,
-                   const float *c)
+static int visual(arc_world *w, int type, int material, int body, vec3 p0, vec3 p1, double r,
+                  double r2, const float *c)
 {
-    arc_add_visual(w, type, body, p0, p1, r, r2, c == GLOW || c == DIM_GLOW, c[0], c[1], c[2]);
+    return arc_add_visual(w, type, body, p0, p1, r, r2, material, c[0], c[1], c[2]);
+}
+
+/* Armor plate along the body z axis, deeper (body x) than wide (body y). */
+static void plate(arc_world *w, int body, vec3 p0, vec3 p1, double r0, double r1, double aspect)
+{
+    int i = visual(w, ARC_VIS_TAPER, ARC_MAT_PAINT, body, p0, p1, r0, r1, ARMOR);
+    if (i >= 0)
+        w->visuals[i].aspect = aspect;
 }
 
 static void set_drive(arc_joint *j, double lo, double hi)
@@ -95,19 +108,38 @@ static void build_leg(arc_world *w, arc_robot_info *info, int leg, double sx, do
     arc_add_sphere(w, bt, v3(0.0, 0.0, 0.4 * tl), 0.035);
     info->foot_sphere[leg] = arc_add_sphere(w, bt, v3(0.0, 0.0, tl), FOOT_R);
 
-    /* hip knob */
-    visual(w, ARC_VIS_CYLINDER, bc, v3_scale(d, -0.5 * COXA_LEN), v3_scale(d, 0.5 * COXA_LEN),
-           0.045, 0.0, STEEL);
-    /* femur: angular, thickening towards a boxy knee */
-    visual(w, ARC_VIS_TAPER, bf, v3(0, 0, -fl), v3(0, 0, fl - 0.06), 0.045, 0.07, HULL);
-    visual(w, ARC_VIS_BOX, bf, v3(0, 0, fl), v3(0.08, 0.075, 0.08), 0.0, 0.0, DARK);
-    visual(w, ARC_VIS_BOX, bf, v3(0.081, 0, fl), v3(0.004, 0.035, 0.05), 0.0, 0.0, GLOW);
-    /* tibia: a blade tapering down to the foot, glowing on its inner face */
-    visual(w, ARC_VIS_TAPER, bt, v3(0, 0, -tl + 0.04), v3(0, 0, tl - 0.06), 0.075, 0.022, HULL);
-    visual(w, ARC_VIS_TAPER, bt, v3(0.05, 0, -tl + 0.12), v3(0.016, 0, 0.1 * tl), 0.018, 0.006,
-           DIM_GLOW);
-    visual(w, ARC_VIS_CYLINDER, bt, v3(0, 0, tl - 0.075), v3(0, 0, tl - 0.04), 0.035, 0.0, STEEL);
-    visual(w, ARC_VIS_SPHERE, bt, v3(0, 0, tl), v3(0, 0, 0), FOOT_R, 0.0, DARK);
+    /* Visuals, after the ARC Raiders leaper: faceted armor plates over
+     * ribbed cable sleeves on the inner side of the leg, bare metal hinges,
+     * a small light on each knee and a rubber ball foot. */
+    visual(w, ARC_VIS_CYLINDER, ARC_MAT_METAL, bc, v3_scale(d, -0.05), v3_scale(d, 0.035),
+           0.062, 0.0, DARK);
+    visual(w, ARC_VIS_RING, ARC_MAT_METAL, bc, v3_scale(d, 0.02), d, 0.062, 0.012, STEEL);
+    visual(w, ARC_VIS_CYLINDER, ARC_MAT_METAL, bf, v3(0, -0.07, -fl), v3(0, 0.07, -fl), 0.045,
+           0.0, DARK);
+    /* femur */
+    plate(w, bf, v3(-0.012, 0, -fl + 0.02), v3(-0.012, 0, fl - 0.02), 0.055, 0.08, 0.8);
+    visual(w, ARC_VIS_CYLINDER, ARC_MAT_RIBS, bf, v3(0.055, 0, -fl + 0.06), v3(0.07, 0, fl - 0.07),
+           0.022, 0.0, CABLE);
+    /* knee */
+    visual(w, ARC_VIS_BOX, ARC_MAT_PAINT, bf, v3(0, 0, fl), v3(0.085, 0.07, 0.075), 0.0, 0.0, DARK);
+    visual(w, ARC_VIS_CYLINDER, ARC_MAT_METAL, bf, v3(0, -0.085, fl), v3(0, 0.085, fl), 0.048, 0.0,
+           STEEL);
+    visual(w, ARC_VIS_CYLINDER, ARC_MAT_GLOW, bf, v3(0, 0.085, fl), v3(0, 0.089, fl), 0.02, 0.0,
+           GLOW);
+    visual(w, ARC_VIS_CYLINDER, ARC_MAT_GLOW, bf, v3(0, -0.089, fl), v3(0, -0.085, fl), 0.02, 0.0,
+           GLOW);
+    /* tibia: two plates meeting in a ridge, tapering down to the ankle */
+    plate(w, bt, v3(-0.01, 0, -tl + 0.03), v3(-0.01, 0, -0.05), 0.068, 0.082, 0.8);
+    plate(w, bt, v3(-0.01, 0, -0.05), v3(-0.004, 0, tl - 0.11), 0.082, 0.03, 0.85);
+    visual(w, ARC_VIS_CYLINDER, ARC_MAT_RIBS, bt, v3(0.065, 0, -tl + 0.08), v3(0.045, 0, 0.25 * tl),
+           0.02, 0.0, CABLE);
+    /* ankle and foot */
+    visual(w, ARC_VIS_CYLINDER, ARC_MAT_METAL, bt, v3(0, 0, tl - 0.12), v3(0, 0, tl - 0.035),
+           0.026, 0.0, STEEL);
+    visual(w, ARC_VIS_RING, ARC_MAT_METAL, bt, v3(0, 0, tl - 0.09), v3(0, 0, 1), 0.03, 0.01, DARK);
+    visual(w, ARC_VIS_SPHERE, ARC_MAT_RUBBER, bt, v3(0, 0, tl), v3(0, 0, 0), FOOT_R, 0.0, BLACK);
+    visual(w, ARC_VIS_RING, ARC_MAT_METAL, bt, v3(0, 0, tl - 0.02), v3(0, 0, 1), 0.036, 0.011,
+           STEEL);
 }
 
 void arc_robot_build(arc_world *w, arc_robot_info *info)
@@ -120,12 +152,22 @@ void arc_robot_build(arc_world *w, arc_robot_info *info)
     arc_add_body(w, BODY_MASS, arc_inertia_sphere(BODY_MASS, BODY_R), v3(0, 0, 0), q_identity());
     arc_add_sphere(w, 0, v3(0, 0, 0), BODY_R);
     info->n_torso_spheres = w->n_spheres;
-    /* hull, eye (dark lens in a glowing ring) and a band around the bottom */
-    visual(w, ARC_VIS_SPHERE, 0, v3(0, 0, 0), v3(0, 0, 0), BODY_R, 0.0, HULL);
-    visual(w, ARC_VIS_CYLINDER, 0, v3(0.12, 0, 0), v3(0.2, 0, 0), 0.13, 0.0, DARK);
-    visual(w, ARC_VIS_RING, 0, v3(0.204, 0, 0), v3(1, 0, 0), 0.105, 0.021, GLOW);
-    visual(w, ARC_VIS_RING, 0, v3(0.201, 0, 0), v3(1, 0, 0), 0.05, 0.008, DIM_GLOW);
-    visual(w, ARC_VIS_RING, 0, v3(0, 0, -0.12), v3(0, 0, 1), 0.158, 0.014, STEEL);
+    /* paneled hull with collars at the top and bottom, a bottom hatch, two
+     * side knobs and the eye: a glossy lens in a silver bezel, ringed by
+     * light. The renderer lights the scene from the first glowing ring. */
+    visual(w, ARC_VIS_SPHERE, ARC_MAT_PANELS, 0, v3(0, 0, 0), v3(0, 0, 0), BODY_R, 0.0, HULL);
+    visual(w, ARC_VIS_RING, ARC_MAT_METAL, 0, v3(0, 0, 0.135), v3(0, 0, 1), 0.148, 0.02, DARK);
+    visual(w, ARC_VIS_RING, ARC_MAT_PAINT, 0, v3(0, 0, -0.125), v3(0, 0, 1), 0.156, 0.024, DARK);
+    visual(w, ARC_VIS_CYLINDER, ARC_MAT_METAL, 0, v3(0, 0, -0.2), v3(0, 0, -0.17), 0.07, 0.0, DARK);
+    for (i = -1; i <= 1; i += 2) {
+        vec3 k = v3_normalize(v3(0.45, 0.62 * i, -0.64));
+        visual(w, ARC_VIS_CYLINDER, ARC_MAT_METAL, 0, v3_scale(k, 0.17), v3_scale(k, 0.215), 0.028,
+               0.0, STEEL);
+    }
+    visual(w, ARC_VIS_RING, ARC_MAT_GLOW, 0, v3(0.18, 0, 0), v3(1, 0, 0), 0.08, 0.013, GLOW);
+    visual(w, ARC_VIS_RING, ARC_MAT_METAL, 0, v3(0.168, 0, 0), v3(1, 0, 0), 0.112, 0.02, BEZEL);
+    visual(w, ARC_VIS_CYLINDER, ARC_MAT_LENS, 0, v3(0.11, 0, 0), v3(0.178, 0, 0), 0.095, 0.0, BLACK);
+    visual(w, ARC_VIS_RING, ARC_MAT_GLOW, 0, v3(0.181, 0, 0), v3(1, 0, 0), 0.032, 0.006, DIM_GLOW);
 
     for (leg = 0; leg < ARC_ROBOT_LEGS; ++leg)
         build_leg(w, info, leg, SX[leg], SY[leg]);

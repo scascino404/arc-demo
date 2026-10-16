@@ -10,7 +10,8 @@ training are in Python, using [Stable Baselines3](https://stable-baselines3.read
 
 ## Setup
 
-You need gcc with OpenMP, the SDL2 and OpenGL development files, and
+You need gcc with OpenMP, the SDL2 and OpenGL development files (the
+renderer needs OpenGL 2.1 with GLSL 1.20), and
 [uv](https://docs.astral.sh/uv/).
 
 ```sh
@@ -32,7 +33,7 @@ bin/arcview
 ```
 
 Opens the simulation without any learning: the robot holds its stance, or
-moves its joints randomly.
+moves its joints randomly. If it falls off the edge, it starts over.
 
 ### Train a policy
 
@@ -81,8 +82,10 @@ Drag with the left mouse button to orbit the camera; scroll to zoom.
 
 ## The task
 
-- **The robot** has a round body with a glowing eye at the front and four
-  long legs, each with three motorized joints (12 in total).
+- **The robot** is modelled on the leaper from ARC Raiders: a round,
+  paneled body with a red ring eye at the front, and four long armored
+  legs, each with three motorized joints (12 in total).
+- **The arena** is a 25.6 m square of blocks floating in a black void.
 - **Actions** are target angles for the 12 joints.
 - **Observations** include the body's orientation and velocity, the joint
   angles, the direction and distance to the checkpoint, the terrain height
@@ -94,8 +97,8 @@ Drag with the left mouse button to orbit the camera; scroll to zoom.
   checkpoint is within the eye's field of view (90 degrees wide), so the
   robot learns to turn towards a new checkpoint first and then walk to it.
   The checkpoint marker lights up while the robot sees it.
-- **Episodes** last 33 s, or end early when the robot flips over or lies on
-  its body for more than a second.
+- **Episodes** last 33 s, or end early when the robot flips over, lies on
+  its body for more than a second, or walks off the edge into the void.
 - **Terrain difficulty** goes from 0 (flat) to 1 (hills and steps). During
   training, each robot's difficulty rises when it does well and drops when it
   falls early, so training keeps pace with what the robot can manage.
@@ -115,7 +118,8 @@ of 33 s per difficulty):
 | 1.00       | 23.5            | 0%      | 3%    |
 
 The robot keeps the checkpoint in view for over 90% of the distance it
-walks.
+walks. This run was trained when walls surrounded the arena. In the void
+arena it never walks off the edge, and it falls about as often as before.
 
 On the same laptop, training runs at about 15-22k steps per second.
 `make bench` and `scripts/bench_env.py` measure the raw simulation speed.
@@ -125,8 +129,9 @@ On the same laptop, training runs at about 15-22k steps per second.
 - `csrc/`: the C code. A small rigid-body physics engine (`arc_phys.c`), the
   robot (`arc_robot.c`), the terrain (`arc_terrain.c`), a simulation of many
   worlds stepped in parallel (`arc_sim.c`), and the renderer
-  (`arc_render.c`). Tests are in `csrc/tests/`, the viewer and benchmark in
-  `csrc/tools/`.
+  (`arc_render.c`: OpenGL 2.1 with small GLSL shaders for per-pixel
+  lighting, a shadow map, fog and glow). Tests are in `csrc/tests/`, the
+  viewer and benchmark in `csrc/tools/`.
 - `arc/`: the Python package. Bindings to the C libraries (`native.py`),
   the task: observations, rewards and terrain difficulty (`task.py`),
   environments for Stable Baselines3 and Gymnasium (`env.py`, registered as

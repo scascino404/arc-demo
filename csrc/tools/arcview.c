@@ -1,6 +1,7 @@
 /*
  * arcview.c - interactive physics viewer, no learning involved: the robot
- * either holds its default stance or follows random joint targets.
+ * either holds its default stance or follows random joint targets. It
+ * starts over when it falls off the terrain into the void.
  *
  * Keys: Space hold / random actions, R new terrain, 0-9 terrain difficulty,
  *       P pause, N single step (paused), S slow motion, C camera view,
@@ -39,6 +40,16 @@ static void reset(viewer *v)
     v->step = 0;
 }
 
+/* The robot left the terrain for the void around it. */
+static int in_void(const viewer *v)
+{
+    const arc_world *w = arc_sim_world(v->sim, 0);
+    const arc_terrain *t = &w->terrain;
+    vec3 x = w->bodies[0].x;
+    return x.z < -2.0 || x.x < t->ox || x.y < t->oy || x.x > t->ox + t->nx * t->cell
+           || x.y > t->oy + t->ny * t->cell;
+}
+
 static void step(viewer *v)
 {
     int i;
@@ -49,6 +60,8 @@ static void step(viewer *v)
         memcpy(v->targets, v->def, sizeof(v->def));
     arc_sim_step(v->sim, v->targets);
     ++v->step;
+    if (in_void(v))
+        reset(v);
 }
 
 static int write_ppm(const char *path, const unsigned char *rgb, int w, int h)

@@ -20,7 +20,7 @@
 #define ARC_MAX_JOINTS 16
 #define ARC_MAX_SPHERES 48
 #define ARC_MAX_CONTACTS 128
-#define ARC_MAX_VISUALS 48
+#define ARC_MAX_VISUALS 80
 
 typedef struct {
     vec3 x, x_prev;    /* center of mass position */
@@ -69,10 +69,22 @@ typedef struct {
 
 enum {
     ARC_VIS_SPHERE,    /* p0 center, radius */
-    ARC_VIS_BOX,       /* p0 center, p1 half extents (body axes) */
-    ARC_VIS_TAPER,     /* square prism along p0-p1, half width radius at p0, radius2 at p1 */
+    ARC_VIS_BOX,       /* p0 center, p1 half extents (body axes), bevelled edges */
+    ARC_VIS_TAPER,     /* chamfered prism along p0-p1, half width radius at p0, radius2
+                        * at p1; the half depth is aspect times the half width */
     ARC_VIS_CYLINDER,  /* closed cylinder along p0-p1, radius */
     ARC_VIS_RING       /* torus: p0 center, p1 axis, radius (major), radius2 (tube) */
+};
+
+/* Surface look of a visual, interpreted by the renderer. */
+enum {
+    ARC_MAT_PAINT,     /* painted armor */
+    ARC_MAT_PANELS,    /* painted armor with panel seams (spheres) */
+    ARC_MAT_METAL,     /* bare metal */
+    ARC_MAT_RUBBER,    /* matte */
+    ARC_MAT_LENS,      /* glossy glass */
+    ARC_MAT_RIBS,      /* ribbed cable sleeve (cylinders) */
+    ARC_MAT_GLOW       /* emissive light */
 };
 
 /* Render-only geometry, in the body frame. Ignored by the solver. */
@@ -81,7 +93,8 @@ typedef struct {
     int body;
     vec3 p0, p1;
     double radius, radius2;
-    int emissive;      /* drawn unlit, e.g. glowing lights */
+    double aspect;     /* ARC_VIS_TAPER depth / width, 1 by default */
+    int material;      /* ARC_MAT_* */
     float color[3];
 } arc_visual;
 
@@ -109,7 +122,7 @@ int arc_add_sphere(arc_world *w, int body, vec3 local_pos, double radius);
  * walk the joints in order. */
 int arc_add_hinge(arc_world *w, int parent, int child, vec3 anchor_world, vec3 axis_world);
 int arc_add_visual(arc_world *w, int type, int body, vec3 p0, vec3 p1,
-                   double radius, double radius2, int emissive, float r, float g, float b);
+                   double radius, double radius2, int material, float r, float g, float b);
 
 /* Advances by dt using `substeps` XPBD substeps. */
 void arc_world_step(arc_world *w, double dt, int substeps);

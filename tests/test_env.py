@@ -63,6 +63,26 @@ def test_falls_terminate():
     env.close()
 
 
+def test_void_terminates():
+    # the torso past the edge of the terrain ends the episode, as a fall
+    env = ArcVecEnv(2, TaskConfig(curriculum=False), seed=0)
+    env.reset()
+    sim = env.task.sim
+    observe = sim.observe
+
+    def observe_off_edge():
+        out = observe()
+        sim.root[1, 0] = sim.half_extent + 0.1
+        return out
+
+    sim.observe = observe_off_edge
+    _, rew, done, infos = env.step(np.zeros((2, 12), dtype=np.float32))
+    assert not done[0]
+    assert done[1] and infos[1]["fell"] and infos[1]["cause"] == "void"
+    assert rew[1] < -env.task.cfg.w_fall + 1.0
+    env.close()
+
+
 def test_determinism():
     def rollout():
         env = ArcVecEnv(4, TaskConfig(difficulty=0.5, curriculum=False), threads=2)

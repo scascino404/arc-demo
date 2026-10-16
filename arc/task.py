@@ -27,7 +27,7 @@ class TaskConfig:
     checkpoint_radius: float = 0.5       # torso center within this distance (drawn ring)
     checkpoint_min_dist: float = 3.0
     checkpoint_max_dist: float = 6.0
-    border: float = 1.5               # keep checkpoints this far from the boundary walls
+    border: float = 1.5               # keep checkpoints this far from the edge
     # Rewards, per control step. The progress term is capped so that speed is
     # not rewarded beyond max_speed (an uncapped one breeds frantic bounding
     # gaits), and the time cost makes hovering or orbiting near a checkpoint
@@ -51,9 +51,11 @@ class TaskConfig:
     w_torso_contact: float = 0.5      # torso touching (scraping over a step)
     w_body_rate: float = 0.01         # per (rad/s)^2 of torso roll / pitch rate
     w_bounce: float = 0.05            # per (m/s)^2 of torso vertical velocity
-    # terminations: flipping over, or the torso resting on the ground too long
+    # terminations: flipping over, the torso resting on the ground too long,
+    # or leaving the terrain for the void around it
     flip_up_z: float = 0.3            # torso up axis z below this (tilt > 72 degrees)
     beached_steps: int = 30           # consecutive steps of torso contact
+    void_z: float = -2.0              # torso below this height (below any column)
     # terrain curriculum: per-world difficulty level in [0, max_difficulty]
     curriculum: bool = True
     difficulty: float = 0.0           # fixed difficulty when curriculum is off
@@ -64,7 +66,7 @@ class TaskConfig:
 
 
 # termination causes reported in infos["cause"]
-CAUSES = ("", "flip", "beached", "unstable")
+CAUSES = ("", "flip", "beached", "unstable", "void")
 
 # heightmap sample grid around the torso, (forward, left) in meters; it covers
 # the feet (about 0.9 m from the torso center) plus some look-ahead
@@ -193,13 +195,12 @@ class ArcTask:
                   - cfg.w_body_rate * np.square(body_rate).sum(1)
                   - cfg.w_bounce * np.square(root[:, 9]))
 
-        # the boundary walls keep robots in; escaping anyway means a solver failure
-        out = np.any(np.abs(pos[:, :2]) > sim.half_extent + 0.5, axis=1)
-        bad = (flags != 0) | out | ~np.all(np.isfinite(root), axis=1)
+        bad = (flags != 0) | ~np.all(np.isfinite(root), axis=1)
+        void = np.any(np.abs(pos[:, :2]) > sim.half_extent, axis=1) | (pos[:, 2] < cfg.void_z)
         flip = rot[:, 2, 2] < cfg.flip_up_z
         beached = self.torso_steps > cfg.beached_steps
-        fell = flip | beached | bad
-        cause = np.where(bad, 3, np.where(flip, 1, np.where(beached, 2, 0)))
+        fell = flip | beached | void | bad
+        cause = np.select([bad, void, flip, beached], [3, 4, 1, 2], 0)
         reward = np.where(fell, reward - cfg.w_fall, reward)
         reward = np.where(bad, -cfg.w_fall, reward)
 

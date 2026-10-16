@@ -52,7 +52,7 @@ class TaskStats(BaseCallback):
         if self.checkpoints:
             self.logger.record("task/checkpoints_per_episode", float(np.mean(self.checkpoints)))
             self.logger.record("task/fall_rate", float(np.mean(self.falls)))
-            for cause in ("flip", "beached", "unstable"):
+            for cause in ("flip", "beached", "unstable", "void"):
                 self.logger.record(f"task/fall_{cause}", float(np.mean([c == cause for c in self.causes])))
         self.logger.record("task/difficulty_mean", float(task.level.mean()))
         self.logger.record("task/difficulty_max", float(task.level.max()))

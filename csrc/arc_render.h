@@ -1,5 +1,5 @@
 /*
- * arc_render.h - SDL2 + OpenGL 2.1 (fixed function) renderer for one world
+ * arc_render.h - SDL2 + OpenGL 2.1 (GLSL 1.20) renderer for one world
  * of a simulation. Used by the interactive viewer, by the "human" render
  * mode, and offscreen (hidden window + framebuffer object) for "rgb_array".
  */
