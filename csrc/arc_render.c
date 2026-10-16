@@ -16,7 +16,8 @@
  * view matrix is kept in GL_PROJECTION, so that gl_ModelViewMatrix maps
  * object to world space in the shaders. Uniforms that only depend on the
  * look or the terrain are set when the program or the terrain is built.
- * Offscreen rendering draws into a framebuffer object of a hidden window.
+ * Offscreen rendering draws into a multisampled framebuffer object of a
+ * hidden window, resolved into a single-sampled one when read back.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -28,6 +29,7 @@
 
 #define MAX_KEYS 32
 #define SHADOW_SIZE 2048
+#define MSAA 4                  /* samples per pixel, windows and offscreen */
 #define SHADOW_RANGE 7.0        /* half width of the shadowed square around the camera target (m) */
 #define VOID_DEPTH 6.0          /* terrain walls are drawn this far below the lowest column */
 #define LAMP_GRID 3             /* LAMP_GRID^2 unseen lamps light the arena from above */
@@ -68,7 +70,9 @@
     X(PFNGLGENRENDERBUFFERSPROC, glGenRenderbuffers) \
     X(PFNGLBINDRENDERBUFFERPROC, glBindRenderbuffer) \
     X(PFNGLRENDERBUFFERSTORAGEPROC, glRenderbufferStorage) \
-    X(PFNGLDELETERENDERBUFFERSPROC, glDeleteRenderbuffers)
+    X(PFNGLDELETERENDERBUFFERSPROC, glDeleteRenderbuffers) \
+    X(PFNGLRENDERBUFFERSTORAGEMULTISAMPLEPROC, glRenderbufferStorageMultisample) \
+    X(PFNGLBLITFRAMEBUFFERPROC, glBlitFramebuffer)
 
 #define GL_DECLARE(type, name) static type p_##name;
 GL_FUNCS(GL_DECLARE)
@@ -86,7 +90,8 @@ struct arc_renderer {
     SDL_Window *win;
     SDL_GLContext ctx;
     int w, h, visible, closed;
-    GLuint fbo, color_rb, depth_rb;          /* offscreen target */
+    GLuint fbo, color_rb, depth_rb;          /* offscreen target, multisampled */
+    GLuint resolve_fbo, resolve_rb;          /* its resolved color, for readback */
     GLuint shadow_fbo, shadow_tex;
     GLuint prog_scene, prog_glow, prog_post;
     scene_uniforms su;
@@ -1039,19 +1044,32 @@ static int load_gl(void)
     return ok;
 }
 
+/* Renderbuffer attached to the bound framebuffer (samples = 0: single-sampled). */
+static GLuint attach(GLenum attachment, GLenum format, int samples, int w, int h)
+{
+    GLuint rb;
+    p_glGenRenderbuffers(1, &rb);
+    p_glBindRenderbuffer(GL_RENDERBUFFER, rb);
+    p_glRenderbufferStorageMultisample(GL_RENDERBUFFER, samples, format, w, h);
+    p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, attachment, GL_RENDERBUFFER, rb);
+    return rb;
+}
+
 static int create_fbo(arc_renderer *r)
 {
+    GLint max_samples = 0;
+    int samples, ok;
+    glGetIntegerv(GL_MAX_SAMPLES, &max_samples);
+    samples = max_samples < MSAA ? max_samples : MSAA;
+    p_glGenFramebuffers(1, &r->resolve_fbo);
+    p_glBindFramebuffer(GL_FRAMEBUFFER, r->resolve_fbo);
+    r->resolve_rb = attach(GL_COLOR_ATTACHMENT0, GL_RGBA8, 0, r->w, r->h);
+    ok = p_glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
     p_glGenFramebuffers(1, &r->fbo);
     p_glBindFramebuffer(GL_FRAMEBUFFER, r->fbo);
-    p_glGenRenderbuffers(1, &r->color_rb);
-    p_glBindRenderbuffer(GL_RENDERBUFFER, r->color_rb);
-    p_glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, r->w, r->h);
-    p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, r->color_rb);
-    p_glGenRenderbuffers(1, &r->depth_rb);
-    p_glBindRenderbuffer(GL_RENDERBUFFER, r->depth_rb);
-    p_glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, r->w, r->h);
-    p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, r->depth_rb);
-    return p_glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+    r->color_rb = attach(GL_COLOR_ATTACHMENT0, GL_RGBA8, samples, r->w, r->h);
+    r->depth_rb = attach(GL_DEPTH_ATTACHMENT, GL_DEPTH_COMPONENT24, samples, r->w, r->h);
+    return ok && p_glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
 }
 
 /* Depth texture with hardware comparison (2x2 PCF with linear filtering). */
@@ -1098,8 +1116,8 @@ arc_renderer *arc_render_create(int width, int height, int visible)
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
-    /* windows get 4x multisampling if available; offscreen frames draw into the FBO */
-    for (msaa = visible ? 4 : 0; !r->win && msaa >= 0; msaa -= 4) {
+    /* windows get multisampling if available; offscreen frames draw into the FBO */
+    for (msaa = visible ? MSAA : 0; !r->win && msaa >= 0; msaa -= MSAA) {
         SDL_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, msaa > 0);
         SDL_GL_SetAttribute(SDL_GL_MULTISAMPLESAMPLES, msaa);
         r->win = SDL_CreateWindow("arc", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, width,
@@ -1126,8 +1144,7 @@ arc_renderer *arc_render_create(int width, int height, int visible)
     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
     glEnable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
-    if (visible)
-        glEnable(GL_MULTISAMPLE);
+    glEnable(GL_MULTISAMPLE);
     r->list_sphere = glGenLists(3);
     r->list_terrain = r->list_sphere + 1;
     r->list_ring = r->list_sphere + 2;
@@ -1161,6 +1178,10 @@ void arc_render_destroy(arc_renderer *r)
             p_glDeleteFramebuffers(1, &r->fbo);
             p_glDeleteRenderbuffers(1, &r->color_rb);
             p_glDeleteRenderbuffers(1, &r->depth_rb);
+        }
+        if (r->resolve_fbo) {
+            p_glDeleteFramebuffers(1, &r->resolve_fbo);
+            p_glDeleteRenderbuffers(1, &r->resolve_rb);
         }
         SDL_GL_DeleteContext(r->ctx);
     }
@@ -1348,6 +1369,12 @@ int arc_render_frame(arc_renderer *r, const arc_sim *s, int world,
         int width = r->w, height = r->h, row, x;
         if (!r->scratch)
             r->scratch = (unsigned char *)malloc((size_t)width * height * 4);
+        if (r->fbo) {
+            p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, r->resolve_fbo);
+            p_glBlitFramebuffer(0, 0, width, height, 0, 0, width, height, GL_COLOR_BUFFER_BIT,
+                                GL_NEAREST);
+            p_glBindFramebuffer(GL_READ_FRAMEBUFFER, r->resolve_fbo);
+        }
         glReadBuffer(r->fbo ? GL_COLOR_ATTACHMENT0 : GL_BACK);
         glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, r->scratch);
         for (row = 0; row < height; ++row) {
