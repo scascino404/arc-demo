@@ -59,7 +59,7 @@ static void test_stand(void)
      * completely still: feet anchored, drives holding */
     for (i = 0; i < 240; ++i) {
         arc_sim_step(s, targets);
-        arc_sim_observe(s, root, 0, contacts, &flags);
+        arc_sim_observe(s, root, 0, 0, contacts, &flags);
         if (i >= 180)
             maxv = arc_max(maxv, sqrt(root[7] * root[7] + root[8] * root[8] + root[9] * root[9]));
     }
@@ -96,7 +96,7 @@ static void run_random(arc_sim *s, unsigned int seed, int steps, double *maxspee
             for (i = 0; i < n * NJ; ++i)
                 targets[i] = arc_rng_range(&rng, lo[i % NJ], hi[i % NJ]);
         arc_sim_step(s, targets);
-        arc_sim_observe(s, root, 0, 0, flags);
+        arc_sim_observe(s, root, 0, 0, 0, flags);
         for (j = 0; j < n; ++j) {
             double *r = root + j * ARC_SIM_ROOT_SIZE;
             *maxspeed = arc_max(*maxspeed, sqrt(r[7] * r[7] + r[8] * r[8] + r[9] * r[9]));
@@ -135,8 +135,8 @@ static void test_determinism(void)
     reset_all(b, 5, 0.7);
     run_random(a, 3, 120, &ms, &u);
     run_random(b, 3, 120, &ms, &u);
-    arc_sim_observe(a, ra, 0, 0, 0);
-    arc_sim_observe(b, rb, 0, 0, 0);
+    arc_sim_observe(a, ra, 0, 0, 0, 0);
+    arc_sim_observe(b, rb, 0, 0, 0, 0);
     check(memcmp(ra, rb, sizeof(ra)) == 0, "bitwise identical states", 0, 0);
     arc_sim_destroy(a);
     arc_sim_destroy(b);

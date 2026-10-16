@@ -19,6 +19,7 @@
 
 typedef struct { double x, y, z; } vec3;
 typedef struct { double w, x, y, z; } quat;
+typedef struct { double m[3][3]; } mat3;   /* row-major */
 
 ARC_INLINE vec3 v3(double x, double y, double z)
 {
@@ -113,6 +114,34 @@ ARC_INLINE quat q_add_rotation(quat q, vec3 w)
     quat d = q_mul(qt(0.0, w.x, w.y, w.z), q);
     return q_normalize(qt(q.w + 0.5 * d.w, q.x + 0.5 * d.x,
                           q.y + 0.5 * d.y, q.z + 0.5 * d.z));
+}
+
+/* Rotation matrix of q / |q| (q need not be normalized, only nonzero). */
+ARC_INLINE void m3_from_quat(mat3 *r, quat q)
+{
+    double k = 2.0 / (q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z);
+    double x2 = q.x * k, y2 = q.y * k, z2 = q.z * k;
+    double xx = q.x * x2, yy = q.y * y2, zz = q.z * z2;
+    double xy = q.x * y2, xz = q.x * z2, yz = q.y * z2;
+    double wx = q.w * x2, wy = q.w * y2, wz = q.w * z2;
+    r->m[0][0] = 1.0 - (yy + zz); r->m[0][1] = xy - wz;         r->m[0][2] = xz + wy;
+    r->m[1][0] = xy + wz;         r->m[1][1] = 1.0 - (xx + zz); r->m[1][2] = yz - wx;
+    r->m[2][0] = xz - wy;         r->m[2][1] = yz + wx;         r->m[2][2] = 1.0 - (xx + yy);
+}
+
+ARC_INLINE vec3 m3_mul_v3(const mat3 *a, vec3 v)
+{
+    return v3(a->m[0][0] * v.x + a->m[0][1] * v.y + a->m[0][2] * v.z,
+              a->m[1][0] * v.x + a->m[1][1] * v.y + a->m[1][2] * v.z,
+              a->m[2][0] * v.x + a->m[2][1] * v.y + a->m[2][2] * v.z);
+}
+
+/* a^T v */
+ARC_INLINE vec3 m3_tmul_v3(const mat3 *a, vec3 v)
+{
+    return v3(a->m[0][0] * v.x + a->m[1][0] * v.y + a->m[2][0] * v.z,
+              a->m[0][1] * v.x + a->m[1][1] * v.y + a->m[2][1] * v.z,
+              a->m[0][2] * v.x + a->m[1][2] * v.y + a->m[2][2] * v.z);
 }
 
 ARC_INLINE double arc_clamp(double v, double lo, double hi)

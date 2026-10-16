@@ -21,6 +21,26 @@ from stable_baselines3.common.vec_env import VecMonitor, VecNormalize
 from arc import ArcVecEnv, TaskConfig
 
 
+def use_bf16_update(policy) -> None:
+    """Runs the hidden layers of the policy and value networks in bfloat16
+    (autocast over fp32 weights) while gradients are enabled, i.e. in the PPO
+    update, where these matmuls are most of the time. Rollouts, the action
+    distribution and the losses stay fp32. On CPUs with native bf16 (AVX512_BF16
+    or AMX) the update gets ~1.7x faster, but in 6M-step runs the policy learned
+    ~20% less per step, which about cancels the gain."""
+    extractor = policy.mlp_extractor
+    forward = extractor.forward
+
+    def mixed(features):
+        if not torch.is_grad_enabled():
+            return forward(features)
+        with torch.autocast("cpu", dtype=torch.bfloat16):
+            latent_pi, latent_vf = forward(features)
+        return latent_pi.float(), latent_vf.float()
+
+    extractor.forward = mixed
+
+
 class TaskStats(BaseCallback):
     """Logs task statistics of finished episodes and saves checkpoints."""
 
@@ -35,11 +55,12 @@ class TaskStats(BaseCallback):
         self.causes: list[str] = []
 
     def _on_step(self) -> bool:
-        for info in self.locals["infos"]:
-            if "checkpoints" in info:
-                self.checkpoints.append(info["checkpoints"])
-                self.falls.append(info["fell"])
-                self.causes.append(info["cause"])
+        infos = self.locals["infos"]
+        for i in np.flatnonzero(self.locals["dones"]):
+            if "checkpoints" in infos[i]:
+                self.checkpoints.append(infos[i]["checkpoints"])
+                self.falls.append(infos[i]["fell"])
+                self.causes.append(infos[i]["cause"])
         if self.num_timesteps >= self.next_save:
             self.next_save += self.save_every
             path = self.out / "checkpoints" / f"step_{self.num_timesteps}"
@@ -74,6 +95,7 @@ def main():
     p.add_argument("--difficulty", type=float, default=None,
                    help="fixed terrain difficulty (disables the curriculum)")
     p.add_argument("--max-difficulty", type=float, default=1.0)
+    p.add_argument("--bf16", action="store_true", help="bfloat16 matmuls in the PPO update")
     p.add_argument("--resume", type=Path, default=None,
                    help="directory with model.zip and vecnormalize.pkl to continue from")
     p.add_argument("--seed", type=int, default=0)
@@ -114,6 +136,9 @@ def main():
             seed=args.seed,
             verbose=1,
         )
+
+    if args.bf16:
+        use_bf16_update(model.policy)
 
     stats = TaskStats(out, save_every=2_000_000, venv=env)
     try:

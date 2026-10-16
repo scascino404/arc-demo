@@ -23,6 +23,9 @@ uv sync         # Python environment (CPU-only torch)
 uv run pytest   # environment tests
 ```
 
+`make` compiles for the host CPU (`-march=native`); build with
+`make OPT="-O3 -g"` for libraries that have to run on other machines.
+
 ## Usage
 
 ```sh
@@ -59,6 +62,44 @@ steps (about 30 minutes on 8 threads of a Ryzen 7 8840U). Evaluated with
 
 The robot walks 91-93% of the distance with the checkpoint in its field of
 view and brings a new checkpoint into view in 0.33 s (median).
+
+## Performance
+
+Throughput on the Ryzen 7 8840U with 8 threads, before and after a
+performance pass, measured back to back (absolute numbers drift with the
+laptop's temperature and background load, the ratios hold):
+
+| steps/s                                               | before | after | speedup |
+|-------------------------------------------------------|-------:|------:|--------:|
+| physics alone, 64 worlds                              | 37k    | 93k   | 2.5x    |
+| `ArcVecEnv` step: physics + task (`scripts/bench_env.py`) | 24k    | 57k   | 2.4x    |
+| `scripts/evaluate.py`                                 | 22k    | 43k   | 1.9-2.0x |
+| `scripts/train.py`, late in training                  | 15k    | 22k   | 1.4x    |
+| `scripts/train.py`, from scratch                      | 11k    | 15k   | 1.3-1.6x |
+
+- Physics: bodies cache their rotation matrix and world-frame inverse
+  inertia, refreshed whenever the solver turns them (an inverse inertia
+  product used to cost two quaternion rotations, a 3x3 block twelve);
+  isotropic bodies skip both that and the gyroscopic term; quaternions are
+  normalized once per substep instead of after every impulse; joint limits
+  are checked without `atan2`; and the solver helpers are force-inlined (as
+  calls, their `vec3` arguments went through stack copies that stalled
+  store forwarding, ~30%). The states match the old solver to rounding
+  (1e-14 m after a step); `-march=native` and FMA add ~13%.
+- Python: torso rotation matrices come from C, terrain heights and
+  observations are gathered in parallel, persistent buffers are passed as raw
+  pointers, and the numpy task logic makes fewer temporaries.
+  `evaluate.py` calls the policy directly rather than through `model.predict`.
+- Training is now bound by the fp32 PPO update (MKL matmuls and ELU, ~40% of
+  an iteration late in training and more early on) and by per-step policy
+  inference and Python overhead at 64 envs. The CPU is power limited: 8 busy
+  cores run at ~3.3 GHz against 4.7 GHz for one, and SMT threads add nothing,
+  so `--threads` stays at the physical core count.
+- Faster, but not better: `--bf16` (bfloat16 matmuls in the PPO update) and
+  `--envs 128 --n-steps 128` (same samples and gradient steps per iteration)
+  bring training to 2x the original steps/s together, but in 6M-step runs each
+  learned ~20% less per step and both together ~30% less, so reaching a given
+  policy took about as long. The defaults stay fp32 with 64 envs x 256 steps.
 
 ## Design
 

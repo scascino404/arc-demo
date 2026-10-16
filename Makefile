@@ -2,9 +2,11 @@
 
 CC      ?= gcc
 CSTD    := -std=c89 -pedantic -Wall -Wextra
-OPT     ?= -O2 -g
+# -march=native and FMA contraction (-ffp-contract=fast) are worth ~13% in the
+# solver; build with e.g. `make OPT="-O3 -g"` for binaries that run elsewhere.
+OPT     ?= -O3 -march=native -ffp-contract=fast -g
 OMP     := -fopenmp
-CFLAGS  := $(CSTD) $(OPT) -fPIC
+CFLAGS  := $(CSTD) $(OPT) -fno-math-errno -fno-trapping-math -fPIC
 LDLIBS  := -lm
 
 BUILD   := build

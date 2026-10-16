@@ -129,6 +129,7 @@ class ArcTask:
         self.ep_return = np.zeros(n)
         self.level = np.full(n, 0.0 if cfg.curriculum else cfg.difficulty)
         self.difficulty = self.level.copy()
+        self._heights = np.empty((n, len(HEIGHT_OFFSETS)))
 
     # -- episode management -------------------------------------------------
 
@@ -170,8 +171,7 @@ class ArcTask:
         self.target[ids] = target
         self.target_z[ids] = self.sim.terrain_at(ids, target)
         self.prev_dist[ids] = np.linalg.norm(target - pos, axis=1)
-        rot = quat_to_mat(self.sim.root[ids, 3:7])
-        self.prev_gaze[ids] = gaze_error(rot, pos, target)
+        self.prev_gaze[ids] = gaze_error(self.sim.rot[ids], pos, target)
         self.in_view[ids] = self.prev_gaze[ids] < np.radians(self.cfg.fov)
 
     # -- stepping -----------------------------------------------------------
@@ -187,8 +187,9 @@ class ArcTask:
         self.steps += 1
 
         pos = root[:, :3]
-        rot = quat_to_mat(root[:, 3:7])
-        dist = np.linalg.norm(self.target - pos[:, :2], axis=1)
+        rot = sim.rot
+        to_target = self.target - pos[:, :2]
+        dist = np.hypot(to_target[:, 0], to_target[:, 1])
         gaze = gaze_error(rot, pos, self.target)
         cos_fov = np.cos(np.radians(cfg.fov))
         view = np.clip((np.cos(gaze) - cos_fov) / (1.0 - cos_fov), 0.0, 1.0)
@@ -200,7 +201,7 @@ class ArcTask:
         turn = self.prev_gaze - gaze
         reached = (dist < cfg.checkpoint_radius) & self.in_view
 
-        body_rate = np.einsum("nji,nj->ni", rot, root[:, 10:13])[:, :2]  # roll, pitch
+        body_rate = np.matmul(root[:, None, 10:13], rot)[:, 0, :2]  # roll, pitch
         torso = contacts[:, nl] > 0
         self.torso_steps = np.where(torso, self.torso_steps + 1, 0)
         power = np.abs(joints[:, nj:2 * nj] * joints[:, 2 * nj:]).sum(1)
@@ -255,12 +256,10 @@ class ArcTask:
 
     def observe(self) -> np.ndarray:
         sim, nj, nl = self.sim, self.nj, self.sim.num_legs
-        root, joints, contacts = sim.root, sim.joints, sim.contacts
-        rot = quat_to_mat(root[:, 3:7])
-        rt = np.transpose(rot, (0, 2, 1))
+        root, joints, contacts, rot = sim.root, sim.joints, sim.contacts, sim.rot
         gravity = -rot[:, 2, :]                       # world -z in body frame
-        lin = np.einsum("nij,nj->ni", rt, root[:, 7:10])
-        ang = np.einsum("nij,nj->ni", rt, root[:, 10:13])
+        lin = np.matmul(root[:, None, 7:10], rot)[:, 0]  # rot^T v
+        ang = np.matmul(root[:, None, 10:13], rot)[:, 0]
 
         # checkpoint in the heading frame
         heading = np.arctan2(rot[:, 1, 0], rot[:, 0, 0])
@@ -270,7 +269,7 @@ class ArcTask:
         dist = np.maximum(np.hypot(fwd, left), 1e-6)
         target = np.stack([fwd / dist, left / dist, np.minimum(dist, 6.0) / 6.0], 1)
 
-        heights = sim.heights(HEIGHT_OFFSETS)
+        heights = sim.heights(HEIGHT_OFFSETS, out=self._heights)
         rel_heights = np.clip(root[:, 2:3] - sim.stand_height - heights, -1.0, 1.0)
 
         obs = np.concatenate([
@@ -281,8 +280,9 @@ class ArcTask:
             target,
             rel_heights,
             contacts[:, :nl],
-        ], axis=1)
-        return np.nan_to_num(obs, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+        ], axis=1, dtype=np.float32)
+        obs[~np.isfinite(obs)] = 0.0
+        return obs
 
     def markers(self, i: int) -> np.ndarray:
         """Checkpoints to draw for world i, rows of (x, y, z, radius)."""

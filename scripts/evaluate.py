@@ -28,7 +28,10 @@ def evaluate(run: Path, difficulty: float, envs: int, steps: int, threads: int, 
     env = VecNormalize.load(str(run / "vecnormalize.pkl"), ArcVecEnv(envs, cfg, threads=threads, seed=seed))
     env.training = False
     env.norm_reward = False
-    model = PPO.load(run / "model.zip", device="cpu")
+    policy = PPO.load(run / "model.zip", device="cpu").policy
+    # what model.predict(obs, deterministic=True) computes, without switching
+    # every module to eval mode again on each call
+    policy.set_training_mode(False)
     task = env.venv.task
     obs = env.reset()
     checkpoints = np.zeros(envs)
@@ -40,7 +43,8 @@ def evaluate(run: Path, difficulty: float, envs: int, steps: int, threads: int, 
     finished = np.zeros(envs, dtype=bool)
     window = stall_seconds / cfg.dt
     for _ in range(steps):
-        action, _ = model.predict(obs, deterministic=True)
+        with torch.no_grad():
+            action = policy.get_distribution(torch.as_tensor(obs)).mode().numpy()
         target = task.target.copy()
         obs, _, done, infos = env.step(action)
         live = ~finished

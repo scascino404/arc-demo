@@ -19,6 +19,15 @@
 #define ARC_MAX_SPEED 60.0      /* m/s; beyond this the world is flagged unstable */
 #define ARC_MAX_SPIN 400.0      /* rad/s */
 
+/* The solver helpers take and return vec3 by value. Inlined, those stay in
+ * registers; as calls they go through stack copies that defeat store-to-load
+ * forwarding, which made the solver ~30% slower. */
+#if defined(__GNUC__)
+#define HOT static __inline__ __attribute__((always_inline))
+#else
+#define HOT static
+#endif
+
 void arc_world_init(arc_world *w)
 {
     memset(w, 0, sizeof(*w));
@@ -26,6 +35,48 @@ void arc_world_init(arc_world *w)
     w->mu_static = 1.0;
     w->mu_dynamic = 0.8;
     arc_terrain_flat(&w->terrain, 1, 1, 1.0, 0.0);
+}
+
+HOT int is_isotropic(vec3 inertia)
+{
+    return inertia.x == inertia.y && inertia.y == inertia.z;
+}
+
+/*
+ * q + 0.5 [w, 0] q: q_add_rotation without the normalization. Inside a
+ * substep the solver lets |q| drift from 1 (the update is linear in q, so
+ * the rotation it represents is unaffected, and body_sync scales by 1/|q|^2)
+ * and normalizes once before deriving velocities. That keeps a sqrt and a
+ * division off the serial chain of constraint solves.
+ */
+HOT quat q_turn(quat q, vec3 w)
+{
+    double hx = 0.5 * w.x, hy = 0.5 * w.y, hz = 0.5 * w.z;
+    return qt(q.w - hx * q.x - hy * q.y - hz * q.z,
+              q.x + hx * q.w + hy * q.z - hz * q.y,
+              q.y - hx * q.z + hy * q.w + hz * q.x,
+              q.z + hx * q.y - hy * q.x + hz * q.w);
+}
+
+/* Refreshes the cached rotation matrix and world-frame inverse inertia from q. */
+HOT void body_sync(arc_body *b)
+{
+    const mat3 *r = &b->rot;
+    vec3 d = b->inv_inertia;
+    int i, j;
+    m3_from_quat(&b->rot, b->q);
+    if (is_isotropic(d)) {
+        /* rot diag(d) rot^T = d I */
+        memset(&b->inv_iw, 0, sizeof(b->inv_iw));
+        b->inv_iw.m[0][0] = b->inv_iw.m[1][1] = b->inv_iw.m[2][2] = d.x;
+        return;
+    }
+    for (i = 0; i < 3; ++i) {
+        vec3 rd = v3(r->m[i][0] * d.x, r->m[i][1] * d.y, r->m[i][2] * d.z);
+        for (j = i; j < 3; ++j)
+            b->inv_iw.m[i][j] = b->inv_iw.m[j][i] =
+                rd.x * r->m[j][0] + rd.y * r->m[j][1] + rd.z * r->m[j][2];
+    }
 }
 
 int arc_add_body(arc_world *w, double mass, vec3 inertia, vec3 pos, quat q)
@@ -41,6 +92,7 @@ int arc_add_body(arc_world *w, double mass, vec3 inertia, vec3 pos, quat q)
     b->inv_mass = 1.0 / mass;
     b->inertia = inertia;
     b->inv_inertia = v3(1.0 / inertia.x, 1.0 / inertia.y, 1.0 / inertia.z);
+    body_sync(b);
     return w->n_bodies++;
 }
 
@@ -144,13 +196,19 @@ double arc_terrain_height(const arc_terrain *t, double x, double y)
 /* Constraint primitives */
 
 /* I^-1 v, with v and the result in world frame. */
-static vec3 inv_inertia_world(const arc_body *b, vec3 v)
+HOT vec3 inv_inertia_world(const arc_body *b, vec3 v)
 {
-    return q_rotate(b->q, v3_mul(q_inv_rotate(b->q, v), b->inv_inertia));
+    return m3_mul_v3(&b->inv_iw, v);
+}
+
+/* Body-frame vector v in world frame; b == NULL is the static world. */
+HOT vec3 body_rotate(const arc_body *b, vec3 v)
+{
+    return b ? m3_mul_v3(&b->rot, v) : v;
 }
 
 /* Generalized inverse mass of a body for a unit impulse n applied at offset r. */
-static double w_pos(const arc_body *b, vec3 r, vec3 n)
+HOT double w_pos(const arc_body *b, vec3 r, vec3 n)
 {
     vec3 rn;
     if (!b)
@@ -159,27 +217,29 @@ static double w_pos(const arc_body *b, vec3 r, vec3 n)
     return b->inv_mass + v3_dot(rn, inv_inertia_world(b, rn));
 }
 
-static double w_rot(const arc_body *b, vec3 n)
+HOT double w_rot(const arc_body *b, vec3 n)
 {
     return b ? v3_dot(n, inv_inertia_world(b, n)) : 0.0;
 }
 
-static void apply_pos_impulse(arc_body *b, vec3 r, vec3 p)
+HOT void apply_pos_impulse(arc_body *b, vec3 r, vec3 p)
 {
     if (!b)
         return;
     b->x = v3_madd(b->x, p, b->inv_mass);
-    b->q = q_add_rotation(b->q, inv_inertia_world(b, v3_cross(r, p)));
+    b->q = q_turn(b->q, inv_inertia_world(b, v3_cross(r, p)));
+    body_sync(b);
 }
 
-static void apply_rot_impulse(arc_body *b, vec3 p)
+HOT void apply_rot_impulse(arc_body *b, vec3 p)
 {
     if (!b)
         return;
-    b->q = q_add_rotation(b->q, inv_inertia_world(b, p));
+    b->q = q_turn(b->q, inv_inertia_world(b, p));
+    body_sync(b);
 }
 
-static void apply_vel_impulse(arc_body *b, vec3 r, vec3 p)
+HOT void apply_vel_impulse(arc_body *b, vec3 r, vec3 p)
 {
     if (!b)
         return;
@@ -192,8 +252,8 @@ static void apply_vel_impulse(arc_body *b, vec3 r, vec3 p)
  * the point at offset r2 of b2 (either body may be NULL for the static
  * world). alpha is the compliance. Returns the impulse magnitude.
  */
-static double solve_pos(arc_body *b1, vec3 r1, arc_body *b2, vec3 r2,
-                        vec3 d, double alpha, double h)
+HOT double solve_pos(arc_body *b1, vec3 r1, arc_body *b2, vec3 r2,
+                     vec3 d, double alpha, double h)
 {
     double c = v3_len(d), denom, dl;
     vec3 n, p;
@@ -230,20 +290,42 @@ static int solve3(const double K[3][3], vec3 d, vec3 *x)
     return 1;
 }
 
-/* K += point mass matrix of body b at offset r: dv = K p for an impulse p. */
-static void add_point_mass(double K[3][3], const arc_body *b, vec3 r)
+/* Solves K x = d for a symmetric K (adjugate). Returns 0 if singular. */
+HOT int solve3_sym(const double K[3][3], vec3 d, vec3 *x)
 {
-    int k;
+    double a = K[0][0], b = K[0][1], c = K[0][2], e = K[1][1], f = K[1][2], g = K[2][2];
+    double A = e * g - f * f, B = c * f - b * g, C = b * f - c * e;
+    double det = a * A + b * B + c * C, inv, D, E, F;
+    if (fabs(det) < 1e-300)
+        return 0;
+    inv = 1.0 / det;
+    D = a * g - c * c;
+    E = b * c - a * f;
+    F = a * e - b * b;
+    x->x = (A * d.x + B * d.y + C * d.z) * inv;
+    x->y = (B * d.x + D * d.y + E * d.z) * inv;
+    x->z = (C * d.x + E * d.y + F * d.z) * inv;
+    return 1;
+}
+
+/* K += point mass matrix of body b at offset r: dv = K p for an impulse p,
+ * K = I / m - [r]x I_w^-1 [r]x, written out (it is symmetric). */
+HOT void add_point_mass(double K[3][3], const arc_body *b, vec3 r)
+{
+    const mat3 *a;
+    double x = r.x, y = r.y, z = r.z, k01, k02, k12;
     if (!b)
         return;
-    for (k = 0; k < 3; ++k) {
-        vec3 e = v3(k == 0, k == 1, k == 2), col;
-        col = v3_add(v3_scale(e, b->inv_mass),
-                     v3_cross(inv_inertia_world(b, v3_cross(r, e)), r));
-        K[0][k] += col.x;
-        K[1][k] += col.y;
-        K[2][k] += col.z;
-    }
+    a = &b->inv_iw;
+    K[0][0] += b->inv_mass + a->m[1][1] * z * z - 2.0 * a->m[1][2] * y * z + a->m[2][2] * y * y;
+    K[1][1] += b->inv_mass + a->m[2][2] * x * x - 2.0 * a->m[0][2] * x * z + a->m[0][0] * z * z;
+    K[2][2] += b->inv_mass + a->m[0][0] * y * y - 2.0 * a->m[0][1] * x * y + a->m[1][1] * x * x;
+    k01 = a->m[1][2] * x * z + a->m[0][2] * y * z - a->m[0][1] * z * z - a->m[2][2] * x * y;
+    k02 = a->m[0][1] * y * z + a->m[1][2] * x * y - a->m[1][1] * x * z - a->m[0][2] * y * y;
+    k12 = a->m[0][2] * x * y + a->m[0][1] * x * z - a->m[0][0] * y * z - a->m[1][2] * x * x;
+    K[0][1] += k01; K[1][0] += k01;
+    K[0][2] += k02; K[2][0] += k02;
+    K[1][2] += k12; K[2][1] += k12;
 }
 
 /*
@@ -252,7 +334,7 @@ static void add_point_mass(double K[3][3], const arc_body *b, vec3 r)
  * (solve_pos) converges badly for joints whose anchor is far from a body
  * with small inertia, e.g. a point mass pendulum.
  */
-static void solve_point(arc_body *b1, vec3 r1, arc_body *b2, vec3 r2, vec3 d)
+HOT void solve_point(arc_body *b1, vec3 r1, arc_body *b2, vec3 r2, vec3 d)
 {
     double K[3][3] = { { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 } };
     vec3 p;
@@ -260,7 +342,7 @@ static void solve_point(arc_body *b1, vec3 r1, arc_body *b2, vec3 r2, vec3 d)
         return;
     add_point_mass(K, b1, r1);
     add_point_mass(K, b2, r2);
-    if (!solve3((const double (*)[3])K, d, &p))
+    if (!solve3_sym((const double (*)[3])K, d, &p))
         return;
     apply_pos_impulse(b1, r1, p);
     apply_pos_impulse(b2, r2, v3_neg(p));
@@ -272,24 +354,21 @@ static void solve_point(arc_body *b1, vec3 r1, arc_body *b2, vec3 r2, vec3 d)
  * leaks rotation into other axes when the world inertia is anisotropic,
  * e.g. spinning a slender leg segment about its own axis.
  */
-static void solve_rot_block(arc_body *b1, arc_body *b2, vec3 rot)
+HOT void solve_rot_block(arc_body *b1, arc_body *b2, vec3 rot)
 {
     double K[3][3] = { { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 } };
     vec3 p;
-    int k;
+    int i, k;
     if (v3_len2(rot) < 1e-24)
         return;
-    for (k = 0; k < 3; ++k) {
-        vec3 e = v3(k == 0, k == 1, k == 2), col = v3(0, 0, 0);
-        if (b1)
-            col = v3_add(col, inv_inertia_world(b1, e));
-        if (b2)
-            col = v3_add(col, inv_inertia_world(b2, e));
-        K[0][k] = col.x;
-        K[1][k] = col.y;
-        K[2][k] = col.z;
-    }
-    if (!solve3((const double (*)[3])K, rot, &p))
+    for (i = 0; i < 3; ++i)
+        for (k = 0; k < 3; ++k) {
+            if (b1)
+                K[i][k] += b1->inv_iw.m[i][k];
+            if (b2)
+                K[i][k] += b2->inv_iw.m[i][k];
+        }
+    if (!solve3_sym((const double (*)[3])K, rot, &p))
         return;
     apply_rot_impulse(b1, p);
     apply_rot_impulse(b2, v3_neg(p));
@@ -300,8 +379,8 @@ static void solve_rot_block(arc_body *b1, arc_body *b2, vec3 rot)
  * The impulse is capped at max_dl. Returns the applied impulse vector
  * (acting on b1; b2 receives its opposite).
  */
-static vec3 solve_rot(arc_body *b1, arc_body *b2, vec3 rot, double alpha,
-                      double h, double max_dl)
+HOT vec3 solve_rot(arc_body *b1, arc_body *b2, vec3 rot, double alpha,
+                   double h, double max_dl)
 {
     double theta = v3_len(rot), denom, dl;
     vec3 n, p;
@@ -349,9 +428,15 @@ double arc_joint_rate(const arc_world *w, const arc_joint *j)
     return v3_dot(v3_sub(w->bodies[j->child].w, wp), a);
 }
 
-static quat parent_q(const arc_body *bp)
+/* Sine and cosine of the joint angle (as in arc_joint_angle) times a common
+ * positive factor, from the cached body rotations; a1 is the world axis. */
+HOT void joint_sincos(const arc_body *bp, const arc_body *bc, const arc_joint *j,
+                      vec3 a1, double *s, double *c)
 {
-    return bp ? bp->q : q_identity();
+    vec3 b1 = body_rotate(bp, j->b1);
+    vec3 b2 = body_rotate(bc, j->b2);
+    *s = v3_dot(v3_cross(b1, b2), a1);
+    *c = v3_dot(b1, b2);
 }
 
 static void solve_joint_positions(arc_world *w, arc_joint *j, double h)
@@ -359,36 +444,42 @@ static void solve_joint_positions(arc_world *w, arc_joint *j, double h)
     arc_body *bp = joint_parent(w, j);
     arc_body *bc = &w->bodies[j->child];
     vec3 a1, r1, r2, p1, p2;
-    double phi;
+    double phi, s, c;
 
     /* PD drive: compliant, torque limited rotation towards the target. The
      * parent is rotated by (phi - target) relative to the child. */
     if (j->kp > 0.0) {
         vec3 p;
-        a1 = q_rotate(parent_q(bp), j->a1);
-        phi = arc_joint_angle(w, j);
+        a1 = body_rotate(bp, j->a1);
+        joint_sincos(bp, bc, j, a1, &s, &c);
+        phi = atan2(s, c);
         p = solve_rot(bp, bc, v3_scale(a1, phi - j->target), 1.0 / j->kp, h,
                       j->max_torque * h * h);
         j->torque_acc -= v3_dot(p, a1) / (h * h);
     }
 
-    /* limits */
+    /* limits. The angle is only needed outside [lo, hi]: for a range of at
+     * most pi, sin(phi - lo) >= 0 and sin(hi - phi) >= 0 mean inside. */
     if (j->lo <= j->hi) {
-        phi = arc_joint_angle(w, j);
-        a1 = q_rotate(parent_q(bp), j->a1);
-        if (phi < j->lo)
-            solve_rot_block(bp, bc, v3_scale(a1, phi - j->lo));
-        else if (phi > j->hi)
-            solve_rot_block(bp, bc, v3_scale(a1, phi - j->hi));
+        a1 = body_rotate(bp, j->a1);
+        joint_sincos(bp, bc, j, a1, &s, &c);
+        if (j->hi - j->lo > ARC_PI || s * j->lim[0] - c * j->lim[1] < 0.0
+            || j->lim[3] * c - j->lim[2] * s < 0.0) {
+            phi = atan2(s, c);
+            if (phi < j->lo)
+                solve_rot_block(bp, bc, v3_scale(a1, phi - j->lo));
+            else if (phi > j->hi)
+                solve_rot_block(bp, bc, v3_scale(a1, phi - j->hi));
+        }
     }
 
     /* hinge axes alignment */
-    a1 = q_rotate(parent_q(bp), j->a1);
-    solve_rot_block(bp, bc, v3_cross(a1, q_rotate(bc->q, j->a2)));
+    a1 = body_rotate(bp, j->a1);
+    solve_rot_block(bp, bc, v3_cross(a1, body_rotate(bc, j->a2)));
 
     /* attachment */
-    r1 = q_rotate(parent_q(bp), j->r1);
-    r2 = q_rotate(bc->q, j->r2);
+    r1 = body_rotate(bp, j->r1);
+    r2 = body_rotate(bc, j->r2);
     p1 = bp ? v3_add(bp->x, r1) : r1;
     p2 = v3_add(bc->x, r2);
     solve_point(bp, r1, bc, r2, v3_sub(p2, p1));
@@ -402,7 +493,7 @@ static void solve_joint_velocities(arc_world *w, arc_joint *j, double h)
     double rel, wsum, impulse, cap;
     if (j->kd <= 0.0)
         return;
-    a = q_rotate(parent_q(bp), j->a1);
+    a = body_rotate(bp, j->a1);
     wp = bp ? bp->w : v3(0.0, 0.0, 0.0);
     rel = v3_dot(v3_sub(bc->w, wp), a);
     wsum = w_rot(bp, a) + w_rot(bc, a);
@@ -423,7 +514,7 @@ static void solve_joint_velocities(arc_world *w, arc_joint *j, double h)
 
 /* Normal contact: push the point out of the terrain and record the contact
  * for the velocity pass. Returns the normal impulse. */
-static double solve_contact(arc_world *w, int bi, vec3 point, vec3 n, double depth, double h)
+HOT double solve_contact(arc_world *w, int bi, vec3 point, vec3 n, double depth, double h)
 {
     arc_body *b = &w->bodies[bi];
     vec3 r = v3_sub(point, b->x);
@@ -431,7 +522,7 @@ static double solve_contact(arc_world *w, int bi, vec3 point, vec3 n, double dep
     if (w->n_contacts < ARC_MAX_CONTACTS) {
         arc_contact *c = &w->contacts[w->n_contacts++];
         c->body = bi;
-        c->local = q_inv_rotate(b->q, r);
+        c->local = m3_tmul_v3(&b->rot, r);
         c->n = n;
         c->lambda_n = ln;
     }
@@ -448,10 +539,10 @@ static double solve_contact(arc_world *w, int bi, vec3 point, vec3 n, double dep
  * lets feet creep when the joints keep pushing them sideways, and lets
  * spheres roll away.
  */
-static void solve_friction(arc_world *w, arc_sphere *s, vec3 n, double ln, double h)
+HOT void solve_friction(arc_world *w, arc_sphere *s, vec3 n, double ln, double h)
 {
     arc_body *b = &w->bodies[s->body];
-    vec3 c = v3_add(b->x, q_rotate(b->q, s->pos));
+    vec3 c = v3_add(b->x, body_rotate(b, s->pos));
     vec3 p = v3_madd(c, n, -s->radius), e, r;
     double len, wt, lt, frac = 1.0;
 
@@ -483,7 +574,7 @@ static void collide_sphere(arc_world *w, arc_sphere *s, double h)
     const arc_terrain *t = &w->terrain;
     arc_body *b = &w->bodies[s->body];
     double rad = s->radius, ln = 0.0;
-    vec3 c = v3_add(b->x, q_rotate(b->q, s->pos)), n_max = v3(0.0, 0.0, 1.0);
+    vec3 c = v3_add(b->x, body_rotate(b, s->pos)), n_max = v3(0.0, 0.0, 1.0);
     double depth_max = 0.0;
     int ix0 = (int)floor((c.x - rad - t->ox) / t->cell);
     int ix1 = (int)floor((c.x + rad - t->ox) / t->cell);
@@ -499,7 +590,6 @@ static void collide_sphere(arc_world *w, arc_sphere *s, double h)
             double dist, depth;
             vec3 q, diff, n;
 
-            c = v3_add(b->x, q_rotate(b->q, s->pos));
             if (c.z - rad >= top)
                 continue;
             /* Skip edges and corners that are buried by an equal or higher
@@ -527,6 +617,7 @@ static void collide_sphere(arc_world *w, arc_sphere *s, double h)
                 depth = top - c.z + rad;
             }
             ln += solve_contact(w, s->body, v3_madd(c, n, -rad), n, depth, h);
+            c = v3_add(b->x, body_rotate(b, s->pos));
             if (depth > depth_max) {
                 depth_max = depth;
                 n_max = n;
@@ -547,7 +638,7 @@ static void solve_contact_velocities(arc_world *w)
     for (i = 0; i < w->n_contacts; ++i) {
         arc_contact *c = &w->contacts[i];
         arc_body *b = &w->bodies[c->body];
-        vec3 r = q_rotate(b->q, c->local);
+        vec3 r = body_rotate(b, c->local);
         vec3 vc = v3_add(b->v, v3_cross(b->w, r));
         double vn = v3_dot(c->n, vc);
 
@@ -596,8 +687,10 @@ static void integrate(arc_world *w, double h)
         b->q_prev = b->q;
         b->v = v3_madd(b->v, w->gravity, h);
         b->x = v3_madd(b->x, b->v, h);
-        b->w = q_rotate(b->q, gyroscopic(b, q_inv_rotate(b->q, b->w), h));
-        b->q = q_add_rotation(b->q, v3_scale(b->w, h));
+        if (!is_isotropic(b->inertia)) /* w x (I w) = 0 */
+            b->w = m3_mul_v3(&b->rot, gyroscopic(b, m3_tmul_v3(&b->rot, b->w), h));
+        b->q = q_turn(b->q, v3_scale(b->w, h));
+        body_sync(b);
     }
 }
 
@@ -606,7 +699,9 @@ static void update_velocities(arc_world *w, double h)
     int i;
     for (i = 0; i < w->n_bodies; ++i) {
         arc_body *b = &w->bodies[i];
-        quat dq = q_mul(b->q, q_conj(b->q_prev));
+        quat dq;
+        b->q = q_normalize(b->q); /* see q_turn */
+        dq = q_mul(b->q, q_conj(b->q_prev));
         b->v = v3_scale(v3_sub(b->x, b->x_prev), 1.0 / h);
         b->w = v3_scale(v3(dq.x, dq.y, dq.z), 2.0 / h);
         if (dq.w < 0.0)
@@ -636,10 +731,19 @@ void arc_world_step(arc_world *w, double dt, int substeps)
     double h = dt / substeps;
     int s, i;
 
+    /* the caller may have changed orientations since the last step */
+    for (i = 0; i < w->n_bodies; ++i)
+        body_sync(&w->bodies[i]);
     for (i = 0; i < w->n_spheres; ++i)
         w->spheres[i].touch = 0;
-    for (i = 0; i < w->n_joints; ++i)
-        w->joints[i].torque_acc = 0.0;
+    for (i = 0; i < w->n_joints; ++i) {
+        arc_joint *j = &w->joints[i];
+        j->torque_acc = 0.0;
+        j->lim[0] = cos(j->lo);
+        j->lim[1] = sin(j->lo);
+        j->lim[2] = cos(j->hi);
+        j->lim[3] = sin(j->hi);
+    }
 
     for (s = 0; s < substeps; ++s) {
         integrate(w, h);
@@ -689,6 +793,7 @@ void arc_world_set_pose(arc_world *w, vec3 pos, quat q, const double *angles)
         b->q_prev = b->q;
         b->v = v3(0.0, 0.0, 0.0);
         b->w = v3(0.0, 0.0, 0.0);
+        body_sync(b);
     }
     for (i = 0; i < w->n_spheres; ++i) {
         w->spheres[i].touch = 0;

@@ -29,6 +29,9 @@ typedef struct {
     vec3 v, w;         /* linear / angular velocity (world frame) */
     double mass, inv_mass;
     vec3 inertia, inv_inertia; /* principal moments, body frame */
+    /* derived from q, refreshed by the solver whenever it changes q */
+    mat3 rot;          /* body to world rotation */
+    mat3 inv_iw;       /* world-frame inverse inertia, rot diag(inv_inertia) rot^T */
 } arc_body;
 
 typedef struct {
@@ -55,6 +58,7 @@ typedef struct {
     /* outputs, refreshed by arc_world_step */
     double angle, rate, torque;
     double torque_acc;
+    double lim[4];     /* cos lo, sin lo, cos hi, sin hi (set by arc_world_step) */
 } arc_joint;
 
 typedef struct {

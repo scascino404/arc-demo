@@ -51,9 +51,11 @@ def sim_lib() -> ctypes.CDLL:
         _declare(lib, "arc_sim_num_legs", ctypes.c_int)
         _declare(lib, "arc_sim_robot_info", None, _vp, _f64, _f64, _f64, _f64)
         _declare(lib, "arc_sim_reset", None, _vp, _i32, ctypes.c_int, _u32, _f64)
-        _declare(lib, "arc_sim_step", None, _vp, _f64)
-        _declare(lib, "arc_sim_observe", None, _vp, _f64, _f64, _f64, _i32)
-        _declare(lib, "arc_sim_heights", None, _vp, _f64, ctypes.c_int, _f64)
+        # called every step: raw addresses, validated by the Sim methods, since
+        # ndpointer argument checks cost a few microseconds per array
+        _declare(lib, "arc_sim_step", None, _vp, _vp)
+        _declare(lib, "arc_sim_observe", None, _vp, _vp, _vp, _vp, _vp, _vp)
+        _declare(lib, "arc_sim_heights", None, _vp, _vp, ctypes.c_int, _vp)
         _declare(lib, "arc_sim_terrain_at", None, _vp, _i32, _f64, ctypes.c_int, _f64)
         _sim_lib = lib
     return _sim_lib
@@ -105,9 +107,13 @@ class Sim:
 
         # output buffers, reused by observe()
         self.root = np.zeros((num_worlds, ROOT_SIZE))
+        self.rot = np.zeros((num_worlds, 3, 3))
         self.joints = np.zeros((num_worlds, 3 * nj))
         self.contacts = np.zeros((num_worlds, self.num_legs + 2))
         self.flags = np.zeros(num_worlds, dtype=np.int32)
+        self._observe_args = (self._ptr, self.root.ctypes.data, self.rot.ctypes.data,
+                              self.joints.ctypes.data, self.contacts.ctypes.data,
+                              self.flags.ctypes.data)
 
     @property
     def ptr(self) -> int:
@@ -131,19 +137,23 @@ class Sim:
     def step(self, targets: np.ndarray) -> None:
         targets = np.ascontiguousarray(targets, dtype=np.float64)
         assert targets.shape == (self.num_worlds, self.num_joints)
-        self._lib.arc_sim_step(self._ptr, targets)
+        self._lib.arc_sim_step(self._ptr, targets.ctypes.data)
 
     def observe(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """root (N, 13), joints (N, 3*J: angles, rates, torques), contacts
-        (N, legs + 2: feet, torso, other), unstable flags (N,)."""
-        self._lib.arc_sim_observe(self._ptr, self.root, self.joints, self.contacts, self.flags)
+        (N, legs + 2: feet, torso, other), unstable flags (N,). Also refreshes
+        rot (N, 3, 3), the torso rotation matrices (body to world)."""
+        self._lib.arc_sim_observe(*self._observe_args)
         return self.root, self.joints, self.contacts, self.flags
 
-    def heights(self, offsets: np.ndarray) -> np.ndarray:
+    def heights(self, offsets: np.ndarray, out: np.ndarray | None = None) -> np.ndarray:
         """Terrain heights at (forward, left) offsets in each torso's heading frame."""
         offsets = np.ascontiguousarray(offsets, dtype=np.float64)
-        out = np.zeros((self.num_worlds, len(offsets)))
-        self._lib.arc_sim_heights(self._ptr, offsets, len(offsets), out)
+        if out is None:
+            out = np.empty((self.num_worlds, len(offsets)))
+        assert out.shape == (self.num_worlds, len(offsets)) and out.dtype == np.float64
+        assert out.flags.c_contiguous
+        self._lib.arc_sim_heights(self._ptr, offsets.ctypes.data, len(offsets), out.ctypes.data)
         return out
 
     def terrain_at(self, ids: np.ndarray, xy: np.ndarray) -> np.ndarray:

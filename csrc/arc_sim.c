@@ -130,18 +130,28 @@ void arc_sim_step(arc_sim *s, const double *targets)
     }
 }
 
-void arc_sim_observe(const arc_sim *s, double *root, double *joints, double *contacts, int *flags)
+void arc_sim_observe(const arc_sim *s, double *root, double *rot, double *joints, double *contacts,
+                     int *flags)
 {
-    int i, j;
+    int i;
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) num_threads(s->threads)
+#endif
     for (i = 0; i < s->n; ++i) {
         const arc_world *w = &s->worlds[i];
         const arc_body *b = &w->bodies[0];
+        int j;
         if (root) {
             double *r = root + i * ARC_SIM_ROOT_SIZE;
             r[0] = b->x.x; r[1] = b->x.y; r[2] = b->x.z;
             r[3] = b->q.w; r[4] = b->q.x; r[5] = b->q.y; r[6] = b->q.z;
             r[7] = b->v.x; r[8] = b->v.y; r[9] = b->v.z;
             r[10] = b->w.x; r[11] = b->w.y; r[12] = b->w.z;
+        }
+        if (rot) {
+            mat3 m;
+            m3_from_quat(&m, b->q);
+            memcpy(rot + i * ARC_SIM_ROT_SIZE, m.m, sizeof(m.m));
         }
         if (joints) {
             double *o = joints + i * ARC_SIM_JOINT_SIZE;
@@ -178,12 +188,16 @@ void arc_sim_observe(const arc_sim *s, double *root, double *joints, double *con
 
 void arc_sim_heights(const arc_sim *s, const double *offsets, int k, double *out)
 {
-    int i, j;
+    int i;
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) num_threads(s->threads)
+#endif
     for (i = 0; i < s->n; ++i) {
         const arc_world *w = &s->worlds[i];
         const arc_body *b = &w->bodies[0];
         vec3 fwd = q_rotate(b->q, v3(1.0, 0.0, 0.0));
         double yaw = atan2(fwd.y, fwd.x), c = cos(yaw), sn = sin(yaw);
+        int j;
         for (j = 0; j < k; ++j) {
             double f = offsets[2 * j], l = offsets[2 * j + 1];
             out[i * k + j] = arc_terrain_height(&w->terrain, b->x.x + c * f - sn * l,
