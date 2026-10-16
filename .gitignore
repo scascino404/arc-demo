@@ -1,0 +1,14 @@
+# build outputs
+/build/
+/arc/*.so
+/bin/
+
+# python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# training outputs
+/runs/
+/out/
