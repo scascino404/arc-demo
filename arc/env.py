@@ -43,6 +43,13 @@ class TaskConfig:
     # below w_fall, so ending the episode on purpose never pays.
     w_progress: float = 10.0          # per meter towards the checkpoint
     max_speed: float = 1.2            # m/s; faster approach earns nothing more
+    # The eye looks along the body's +x axis. Progress towards a checkpoint
+    # only pays while the checkpoint is in view, fully when it is dead ahead
+    # and fading out at the edge of the field of view; turning the eye
+    # towards the checkpoint pays w_turn per radian; and a checkpoint only
+    # counts when reached while in view. So: look first, then walk eye-first.
+    fov: float = 45.0                 # half angle of the field of view, degrees
+    w_turn: float = 1.0               # per radian of gaze error reduction
     w_checkpoint: float = 10.0
     w_time: float = 0.05
     w_fall: float = 10.0
@@ -90,6 +97,15 @@ def quat_to_mat(q: np.ndarray) -> np.ndarray:
     return r
 
 
+def gaze_error(rot: np.ndarray, pos: np.ndarray, target: np.ndarray) -> np.ndarray:
+    """Unsigned angle (rad) between the eye's gaze (body +x, projected on the
+    ground) and the direction from the body to the target."""
+    fwd = rot[:, :2, 0]
+    d = target - pos[:, :2]
+    cross = fwd[:, 0] * d[:, 1] - fwd[:, 1] * d[:, 0]
+    return np.abs(np.arctan2(cross, np.sum(fwd * d, axis=1)))
+
+
 class ArcTask:
     def __init__(self, num_worlds: int, config: TaskConfig | None = None, threads: int = 1,
                  seed: int | None = None):
@@ -104,6 +120,8 @@ class ArcTask:
         self.target = np.zeros((n, 2))
         self.target_z = np.zeros(n)
         self.prev_dist = np.zeros(n)
+        self.prev_gaze = np.zeros(n)          # angle between gaze and checkpoint
+        self.in_view = np.zeros(n, dtype=bool)
         self.prev_action = np.zeros((n, nj))
         self.torso_steps = np.zeros(n, dtype=np.int64)
         self.steps = np.zeros(n, dtype=np.int64)
@@ -152,6 +170,9 @@ class ArcTask:
         self.target[ids] = target
         self.target_z[ids] = self.sim.terrain_at(ids, target)
         self.prev_dist[ids] = np.linalg.norm(target - pos, axis=1)
+        rot = quat_to_mat(self.sim.root[ids, 3:7])
+        self.prev_gaze[ids] = gaze_error(rot, pos, target)
+        self.in_view[ids] = self.prev_gaze[ids] < np.radians(self.cfg.fov)
 
     # -- stepping -----------------------------------------------------------
 
@@ -166,17 +187,26 @@ class ArcTask:
         self.steps += 1
 
         pos = root[:, :3]
-        dist = np.linalg.norm(self.target - pos[:, :2], axis=1)
-        progress = np.minimum(self.prev_dist - dist, cfg.max_speed * cfg.dt)
-        reached = dist < cfg.checkpoint_radius
-
         rot = quat_to_mat(root[:, 3:7])
+        dist = np.linalg.norm(self.target - pos[:, :2], axis=1)
+        gaze = gaze_error(rot, pos, self.target)
+        cos_fov = np.cos(np.radians(cfg.fov))
+        view = np.clip((np.cos(gaze) - cos_fov) / (1.0 - cos_fov), 0.0, 1.0)
+        self.in_view = gaze < np.radians(cfg.fov)
+        progress = np.minimum(self.prev_dist - dist, cfg.max_speed * cfg.dt)
+        # approaching pays only as much as the checkpoint is in view; moving
+        # away always costs, so no back-and-forth cycle can earn reward
+        progress = np.where(progress > 0, progress * view, progress)
+        turn = self.prev_gaze - gaze
+        reached = (dist < cfg.checkpoint_radius) & self.in_view
+
         body_rate = np.einsum("nji,nj->ni", rot, root[:, 10:13])[:, :2]  # roll, pitch
         torso = contacts[:, nl] > 0
         self.torso_steps = np.where(torso, self.torso_steps + 1, 0)
         power = np.abs(joints[:, nj:2 * nj] * joints[:, 2 * nj:]).sum(1)
         rate = np.square(a - self.prev_action).sum(1)
         reward = (cfg.w_progress * progress
+                  + cfg.w_turn * turn
                   + cfg.w_checkpoint * reached
                   - cfg.w_time
                   - cfg.w_energy * power * cfg.dt
@@ -197,6 +227,7 @@ class ArcTask:
         reward = np.where(bad, -cfg.w_fall, reward)
 
         self.prev_dist = dist
+        self.prev_gaze = gaze
         self.prev_action = a
         self.checkpoints += reached
         self.ep_return += reward
@@ -281,7 +312,8 @@ class _View:
             return None
         if self.renderer is None:
             self.renderer = Renderer(*self.size, visible=self.render_mode == "human")
-        img = self.renderer.frame(task.sim, world, task.markers(world), 0,
+        active = 0 if task.in_view[world] else -1  # lit while the robot sees it
+        img = self.renderer.frame(task.sim, world, task.markers(world), active,
                                   rgb=self.render_mode == "rgb_array")
         if self.render_mode == "human":
             self.renderer.set_title(

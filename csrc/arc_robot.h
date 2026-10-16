@@ -1,10 +1,11 @@
 /*
- * arc_robot.h - the robot: a spider-like quadruped. A low torso with four
- * legs splayed diagonally outwards, each with a hip yaw, a hip pitch and a
- * knee joint; in the default stance the knees are high above the torso and
- * the shins come down steeply. Forward is +X, up is +Z.
+ * arc_robot.h - the robot: a "leaper"-style spider. A spherical body with a
+ * glowing eye marking the front (+X) hangs below four long legs splayed
+ * diagonally outwards, each with a hip yaw, a hip pitch and a knee joint; in
+ * the default stance the knees are high above the body and the long shins
+ * come down steeply. Up is +Z.
  *
- * Bodies: 0 torso, then coxa, femur, tibia for each leg in the order
+ * Bodies: 0 body, then coxa, femur, tibia for each leg in the order
  * front-left, front-right, hind-left, hind-right. Joint 3*leg + k drives
  * body 3*leg + k + 1. Positive angles: yaw swings the leg forwards, pitch
  * and knee lift the distal segment.

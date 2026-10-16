@@ -90,7 +90,7 @@ int arc_add_hinge(arc_world *w, int parent, int child, vec3 anchor_world, vec3 a
 }
 
 int arc_add_visual(arc_world *w, int type, int body, vec3 p0, vec3 p1,
-                   double radius, float r, float g, float b)
+                   double radius, double radius2, int emissive, float r, float g, float b)
 {
     arc_visual *v;
     if (w->n_visuals >= ARC_MAX_VISUALS)
@@ -101,6 +101,8 @@ int arc_add_visual(arc_world *w, int type, int body, vec3 p0, vec3 p1,
     v->p0 = p0;
     v->p1 = p1;
     v->radius = radius;
+    v->radius2 = radius2;
+    v->emissive = emissive;
     v->color[0] = r;
     v->color[1] = g;
     v->color[2] = b;

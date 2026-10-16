@@ -34,4 +34,8 @@ int arc_render_keys(arc_renderer *r, int *keys, int max);
 
 void arc_render_set_title(arc_renderer *r, const char *title);
 
+/* Camera presets around the robot's heading: 0 behind, 1 side, 2 front.
+ * The C key cycles through them in the window. */
+void arc_render_set_view(arc_renderer *r, int preset);
+
 #endif

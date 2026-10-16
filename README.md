@@ -1,6 +1,6 @@
 # arc-demo
 
-A spider-like quadruped learns to cross rough block terrain and reach
+A leaper-like robot spider learns to cross rough block terrain and reach
 randomly placed checkpoints, inspired by Embark Studios'
 [Transforming animation with machine learning](https://medium.com/embarkstudios/transforming-animation-with-machine-learning-27ac694590c).
 
@@ -39,7 +39,8 @@ uv run tensorboard --logdir runs
 simulation and torch.
 
 Viewer keys: Space toggles hold/random actions (arcview) or pauses (enjoy),
-R new terrain, 0-9 terrain difficulty, Esc/Q quit. Left drag orbits the
+R new terrain, 0-9 terrain difficulty, C camera (behind / side / front),
+Esc/Q quit. Left drag orbits the
 camera, the wheel zooms.
 
 ## Design
@@ -74,10 +75,13 @@ iteration per substep.
 
 ### Robot (`csrc/arc_robot.c`)
 
-A 21.6 kg spider-like quadruped: a low torso and four legs splayed at 45
-degrees, each with hip yaw, hip pitch and knee joints (12 PD-driven joints,
-200 N m/rad, 80 N m limit). In the default stance the knees are well above
-the torso and the shins come down steeply, feet about 0.9 m from the center.
+A 19.6 kg spider modelled after ARC Raiders' leaper: a spherical body with a
+glowing red ring eye marking the front, hanging below four long legs splayed
+at 45 degrees. Each leg has hip yaw, hip pitch and knee joints (12 PD-driven
+joints, 250 N m/rad, 80 N m limit). In the default stance the knees are high
+above the body and the long blade-like shins come down steeply; the feet are
+about 0.8 m from the center. The hip links carry the reflected inertia of
+the hip motors ("armature"), which the solver needs to stay stable.
 
 ### Task (`arc/env.py`)
 
@@ -91,6 +95,12 @@ the torso and the shins come down steeply, feet about 0.9 m from the center.
   beyond that earns nothing), a bonus per checkpoint (torso within 0.5 m,
   the drawn ring), a small time cost, and penalties for joint work, action
   changes, torso/knee contact, torso roll/pitch rate and vertical bounce.
+- Viewing direction: the eye looks along the body's forward axis with a
+  45 degree half-angle field of view. Progress only pays while the
+  checkpoint is in view (fully when dead ahead), turning the eye towards it
+  pays per radian, and a checkpoint only counts when reached in view. The
+  robot therefore turns to look at a new checkpoint, then walks to it
+  eye-first. The marker lights up while the robot sees it.
 - Episodes end when the robot flips (tilt > 72 degrees) or rests on its
   torso for over 1 s, with a penalty. The time cost's discounted sum (5)
   stays below the fall penalty (10), so ending an episode on purpose never

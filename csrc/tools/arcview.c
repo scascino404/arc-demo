@@ -3,11 +3,13 @@
  * either holds its default stance or follows random joint targets.
  *
  * Keys: Space hold / random actions, R new terrain, 0-9 terrain difficulty,
- *       P pause, N single step (paused), S slow motion, Esc/Q quit.
+ *       P pause, N single step (paused), S slow motion, C camera view,
+ *       Esc/Q quit.
  * Mouse: left drag orbits the camera, wheel zooms.
  *
  * Offscreen screenshot (for automated checks):
  *   arcview --shot out.ppm [--steps N] [--difficulty D] [--random] [--seed S]
+ *           [--view 0|1|2]   (camera behind / side / front)
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -60,7 +62,7 @@ static int write_ppm(const char *path, const unsigned char *rgb, int w, int h)
     return 1;
 }
 
-static int screenshot(viewer *v, const char *path, int steps)
+static int screenshot(viewer *v, const char *path, int steps, int view)
 {
     arc_renderer *r = arc_render_create(960, 540, 0);
     unsigned char *rgb;
@@ -69,6 +71,7 @@ static int screenshot(viewer *v, const char *path, int steps)
         fprintf(stderr, "arcview: cannot create offscreen renderer: %s\n", SDL_GetError());
         return 1;
     }
+    arc_render_set_view(r, view);
     arc_render_size(r, &w, &h);
     rgb = (unsigned char *)malloc((size_t)w * h * 3);
     for (i = 0; i < steps; ++i) {
@@ -88,7 +91,7 @@ int main(int argc, char **argv)
     viewer v;
     arc_renderer *r;
     const char *shot = 0;
-    int i, paused = 0, slow = 0, steps = 90, keys[32], nk;
+    int i, paused = 0, slow = 0, steps = 90, view = 0, keys[32], nk;
     Uint32 next_tick;
     char title[160];
 
@@ -101,8 +104,9 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--difficulty") && i + 1 < argc) v.difficulty = atof(argv[++i]);
         else if (!strcmp(argv[i], "--seed") && i + 1 < argc) v.seed = (unsigned int)atoi(argv[++i]);
         else if (!strcmp(argv[i], "--random")) v.random_actions = 1;
+        else if (!strcmp(argv[i], "--view") && i + 1 < argc) view = atoi(argv[++i]);
         else {
-            fprintf(stderr, "usage: arcview [--shot out.ppm] [--steps N] [--difficulty D] [--seed S] [--random]\n");
+            fprintf(stderr, "usage: arcview [--shot out.ppm] [--steps N] [--difficulty D] [--seed S] [--random] [--view V]\n");
             return 2;
         }
     }
@@ -112,7 +116,7 @@ int main(int argc, char **argv)
     arc_rng_seed(&v.rng, v.seed);
     reset(&v);
     if (shot) {
-        int rc = screenshot(&v, shot, steps);
+        int rc = screenshot(&v, shot, steps, view);
         arc_sim_destroy(v.sim);
         return rc;
     }

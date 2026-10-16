@@ -171,3 +171,54 @@ def test_torso_contact_is_penalized_then_terminal():
     assert first_contact is not None and end is not None
     assert cause == "beached" and end - first_contact >= cfg.beached_steps
     env.close()
+
+
+# -- viewing direction ---------------------------------------------------------
+
+def _standing_env(seed):
+    env = ArcVecEnv(1, TaskConfig(curriculum=False), seed=seed)
+    env.reset()
+    for _ in range(150):
+        env.step(np.zeros((1, 12), dtype=np.float32))
+    return env, env.task
+
+
+def _place_target(task, angle, dist):
+    """Puts the checkpoint at `angle` (rad) from the gaze, `dist` meters away."""
+    from arc.env import quat_to_mat
+    rot = quat_to_mat(task.sim.root[:, 3:7])
+    heading = np.arctan2(rot[0, 1, 0], rot[0, 0, 0]) + angle
+    task.target[0] = task.sim.root[0, :2] + dist * np.array([np.cos(heading), np.sin(heading)])
+    task.prev_dist[0] = dist
+    task.prev_gaze[0] = abs(angle)
+
+
+def test_progress_pays_only_when_target_in_view():
+    env, task = _standing_env(8)
+    rewards = {}
+    for angle in (0.0, np.pi):
+        _place_target(task, angle, 3.0)
+        task.prev_dist[0] += 0.03  # pretend the robot just walked 3 cm towards it
+        rewards[angle] = env.step(np.zeros((1, 12), dtype=np.float32))[1][0]
+    assert rewards[0.0] > rewards[np.pi] + 0.8 * task.cfg.w_progress * 0.03
+    env.close()
+
+
+def test_turning_towards_target_pays():
+    env, task = _standing_env(9)
+    _place_target(task, np.pi / 2, 3.0)
+    task.prev_gaze[0] += 0.2  # pretend the eye just turned 0.2 rad towards it
+    rew = env.step(np.zeros((1, 12), dtype=np.float32))[1][0]
+    assert rew > 0.8 * task.cfg.w_turn * 0.2 - task.cfg.w_time
+    env.close()
+
+
+def test_checkpoint_counts_only_when_seen():
+    env, task = _standing_env(10)
+    _place_target(task, np.pi, 0.3)  # right behind: not seen
+    env.step(np.zeros((1, 12), dtype=np.float32))
+    assert task.checkpoints[0] == 0
+    _place_target(task, 0.0, 0.3)  # right in front
+    env.step(np.zeros((1, 12), dtype=np.float32))
+    assert task.checkpoints[0] == 1
+    env.close()

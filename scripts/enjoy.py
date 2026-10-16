@@ -4,7 +4,8 @@
     uv run python scripts/enjoy.py runs/flat1 --difficulty 0.6
     uv run python scripts/enjoy.py runs/flat1 --record out/flat1.gif --seconds 20
 
-Keys: R new terrain, 0-9 terrain difficulty, Space pause, Esc/Q quit.
+Keys: R new terrain, 0-9 terrain difficulty, Space pause, C camera view,
+Esc/Q quit.
 Mouse: left drag orbits the camera, wheel zooms.
 """
 

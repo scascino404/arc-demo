@@ -72,14 +72,22 @@ typedef struct {
     double h[ARC_GRID_MAX * ARC_GRID_MAX]; /* column heights, h[ix + iy * nx] */
 } arc_terrain;
 
-enum { ARC_VIS_SPHERE, ARC_VIS_CAPSULE, ARC_VIS_BOX };
+enum {
+    ARC_VIS_SPHERE,    /* p0 center, radius */
+    ARC_VIS_CAPSULE,   /* p0-p1 segment, radius */
+    ARC_VIS_BOX,       /* p0 center, p1 half extents (body axes) */
+    ARC_VIS_TAPER,     /* square prism along p0-p1, half width radius at p0, radius2 at p1 */
+    ARC_VIS_CYLINDER,  /* closed cylinder along p0-p1, radius */
+    ARC_VIS_RING       /* torus: p0 center, p1 axis, radius (major), radius2 (tube) */
+};
 
-/* Render-only geometry. Ignored by the solver. */
+/* Render-only geometry, in the body frame. Ignored by the solver. */
 typedef struct {
     int type;
     int body;
-    vec3 p0, p1;       /* sphere: p0 center; capsule: p0-p1 segment; box: p0 center, p1 half extents */
-    double radius;
+    vec3 p0, p1;
+    double radius, radius2;
+    int emissive;      /* drawn unlit, e.g. glowing lights */
     float color[3];
 } arc_visual;
 
@@ -107,7 +115,7 @@ int arc_add_sphere(arc_world *w, int body, vec3 local_pos, double radius);
  * walk the joints in order. */
 int arc_add_hinge(arc_world *w, int parent, int child, vec3 anchor_world, vec3 axis_world);
 int arc_add_visual(arc_world *w, int type, int body, vec3 p0, vec3 p1,
-                   double radius, float r, float g, float b);
+                   double radius, double radius2, int emissive, float r, float g, float b);
 
 /* Advances by dt using `substeps` XPBD substeps. */
 void arc_world_step(arc_world *w, double dt, int substeps);

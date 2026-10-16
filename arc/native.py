@@ -72,6 +72,7 @@ def render_lib() -> ctypes.CDLL:
                  ctypes.POINTER(ctypes.c_int))
         _declare(lib, "arc_render_keys", ctypes.c_int, _vp, _i32, ctypes.c_int)
         _declare(lib, "arc_render_set_title", None, _vp, ctypes.c_char_p)
+        _declare(lib, "arc_render_set_view", None, _vp, ctypes.c_int)
         _render_lib = lib
     return _render_lib
 
@@ -202,6 +203,10 @@ class Renderer:
 
     def set_title(self, title: str) -> None:
         self._lib.arc_render_set_title(self._ptr, title.encode())
+
+    def set_view(self, preset: int) -> None:
+        """Camera preset around the robot's heading: 0 behind, 1 side, 2 front."""
+        self._lib.arc_render_set_view(self._ptr, preset)
 
     def close(self) -> None:
         if self._ptr:

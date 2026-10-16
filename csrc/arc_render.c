@@ -31,7 +31,7 @@ struct arc_renderer {
     GLuint list_sphere, list_cylinder, list_box, list_terrain;
     double terrain_key;
     /* camera: orbit around a smoothed target, behind the robot's heading */
-    int cam_init, dragging;
+    int cam_init, dragging, view;
     vec3 cam_target;
     double cam_heading, cam_yaw, cam_pitch, cam_dist;
     int keys[MAX_KEYS], n_keys;
@@ -225,29 +225,119 @@ static void draw_sphere(const arc_renderer *r, vec3 c, double rad)
     glPopMatrix();
 }
 
-static void draw_capsule(const arc_renderer *r, vec3 p0, vec3 p1, double rad)
+/* Translates to p0 and rotates the z axis onto the unit vector d. */
+static void align_z(vec3 p0, vec3 d)
 {
-    vec3 d = v3_sub(p1, p0), axis;
-    double len = v3_len(d);
-    draw_sphere(r, p0, rad);
-    draw_sphere(r, p1, rad);
-    if (len < 1e-9)
-        return;
-    d = v3_scale(d, 1.0 / len);
-    axis = v3_cross(v3(0, 0, 1), d);
-    glPushMatrix();
+    vec3 axis = v3_cross(v3(0, 0, 1), d);
     glTranslated(p0.x, p0.y, p0.z);
     if (v3_len(axis) > 1e-9)
         glRotated(acos(arc_clamp(d.z, -1.0, 1.0)) * 180.0 / ARC_PI, axis.x, axis.y, axis.z);
     else if (d.z < 0.0)
         glRotated(180.0, 1.0, 0.0, 0.0);
+}
+
+static void draw_capsule(const arc_renderer *r, vec3 p0, vec3 p1, double rad)
+{
+    vec3 d = v3_sub(p1, p0);
+    double len = v3_len(d);
+    draw_sphere(r, p0, rad);
+    draw_sphere(r, p1, rad);
+    if (len < 1e-9)
+        return;
+    glPushMatrix();
+    align_z(p0, v3_scale(d, 1.0 / len));
     glScaled(rad, rad, len);
     glCallList(r->list_cylinder);
     glPopMatrix();
 }
 
+static void disc(double z, double rad, double nz)
+{
+    int j, slices = 24;
+    glBegin(GL_TRIANGLE_FAN);
+    glNormal3d(0, 0, nz);
+    glVertex3d(0, 0, z);
+    for (j = 0; j <= slices; ++j) {
+        double p = 2.0 * ARC_PI * (nz > 0 ? j : slices - j) / slices;
+        glVertex3d(rad * cos(p), rad * sin(p), z);
+    }
+    glEnd();
+}
+
+static void draw_cylinder(const arc_renderer *r, vec3 p0, vec3 p1, double rad)
+{
+    vec3 d = v3_sub(p1, p0);
+    double len = v3_len(d);
+    if (len < 1e-9)
+        return;
+    glPushMatrix();
+    align_z(p0, v3_scale(d, 1.0 / len));
+    disc(0.0, rad, -1.0);
+    disc(len, rad, 1.0);
+    glScaled(rad, rad, len);
+    glCallList(r->list_cylinder);
+    glPopMatrix();
+}
+
+/* Square prism along p0-p1 whose half width goes from r0 to r1. */
+static void draw_taper(vec3 p0, vec3 p1, double r0, double r1)
+{
+    static const double SX[4] = { 1, -1, -1, 1 }, SY[4] = { 1, 1, -1, -1 };
+    vec3 d = v3_sub(p1, p0);
+    double len = v3_len(d);
+    int k;
+    if (len < 1e-9)
+        return;
+    glPushMatrix();
+    align_z(p0, v3_scale(d, 1.0 / len));
+    glBegin(GL_QUADS);
+    for (k = 0; k < 4; ++k) {
+        int m = (k + 1) % 4;
+        /* outward normal of the face between corners k and m */
+        vec3 a = v3(SX[k] * r0, SY[k] * r0, 0), b = v3(SX[m] * r0, SY[m] * r0, 0);
+        vec3 c = v3(SX[m] * r1, SY[m] * r1, len);
+        vec3 n = v3_normalize(v3_cross(v3_sub(b, a), v3_sub(c, a)));
+        glNormal3d(n.x, n.y, n.z);
+        glVertex3d(a.x, a.y, a.z);
+        glVertex3d(b.x, b.y, b.z);
+        glVertex3d(c.x, c.y, c.z);
+        glVertex3d(SX[k] * r1, SY[k] * r1, len);
+    }
+    glNormal3d(0, 0, -1);
+    for (k = 3; k >= 0; --k)
+        glVertex3d(SX[k] * r0, SY[k] * r0, 0.0);
+    glNormal3d(0, 0, 1);
+    for (k = 0; k < 4; ++k)
+        glVertex3d(SX[k] * r1, SY[k] * r1, len);
+    glEnd();
+    glPopMatrix();
+}
+
+/* Torus around the unit axis through c. */
+static void draw_ring(vec3 c, vec3 axis, double major, double tube)
+{
+    int i, j, nu = 32, nv = 10;
+    glPushMatrix();
+    align_z(c, v3_normalize(axis));
+    for (i = 0; i < nu; ++i) {
+        double u0 = 2.0 * ARC_PI * i / nu, u1 = 2.0 * ARC_PI * (i + 1) / nu;
+        glBegin(GL_QUAD_STRIP);
+        for (j = 0; j <= nv; ++j) {
+            double v = 2.0 * ARC_PI * j / nv, cv = cos(v), sv = sin(v);
+            glNormal3d(cv * cos(u1), cv * sin(u1), sv);
+            glVertex3d((major + tube * cv) * cos(u1), (major + tube * cv) * sin(u1), tube * sv);
+            glNormal3d(cv * cos(u0), cv * sin(u0), sv);
+            glVertex3d((major + tube * cv) * cos(u0), (major + tube * cv) * sin(u0), tube * sv);
+        }
+        glEnd();
+    }
+    glPopMatrix();
+}
+
 static void draw_visual(const arc_renderer *r, const arc_visual *v)
 {
+    if (v->emissive)
+        glDisable(GL_LIGHTING);
     glColor3fv(v->color);
     switch (v->type) {
     case ARC_VIS_SPHERE:
@@ -263,7 +353,18 @@ static void draw_visual(const arc_renderer *r, const arc_visual *v)
         glCallList(r->list_box);
         glPopMatrix();
         break;
+    case ARC_VIS_TAPER:
+        draw_taper(v->p0, v->p1, v->radius, v->radius2);
+        break;
+    case ARC_VIS_CYLINDER:
+        draw_cylinder(r, v->p0, v->p1, v->radius);
+        break;
+    case ARC_VIS_RING:
+        draw_ring(v->p0, v->p1, v->radius, v->radius2);
+        break;
     }
+    if (v->emissive)
+        glEnable(GL_LIGHTING);
 }
 
 /* World-space center and footprint radius of a visual, for its shadow. */
@@ -272,9 +373,9 @@ static void visual_extent(const arc_world *w, const arc_visual *v, vec3 *c, doub
     const arc_body *b = &w->bodies[v->body];
     vec3 local = v->p0;
     *rad = v->radius;
-    if (v->type == ARC_VIS_CAPSULE) {
+    if (v->type == ARC_VIS_CAPSULE || v->type == ARC_VIS_TAPER || v->type == ARC_VIS_CYLINDER) {
         local = v3_scale(v3_add(v->p0, v->p1), 0.5);
-        *rad = v->radius + 0.35 * v3_len(v3_sub(v->p1, v->p0));
+        *rad = arc_max(v->radius, v->radius2) + 0.35 * v3_len(v3_sub(v->p1, v->p0));
     } else if (v->type == ARC_VIS_BOX) {
         *rad = 0.8 * arc_max(v->p1.x, v->p1.y);
     }
@@ -429,6 +530,8 @@ static void handle_events(arc_renderer *r)
         case SDL_KEYDOWN:
             if (e.key.keysym.sym == SDLK_ESCAPE || e.key.keysym.sym == SDLK_q)
                 r->closed = 1;
+            if (e.key.keysym.sym == SDLK_c)
+                arc_render_set_view(r, r->view + 1);
             if (r->n_keys < MAX_KEYS)
                 r->keys[r->n_keys++] = (int)e.key.keysym.sym;
             break;
@@ -508,9 +611,8 @@ arc_renderer *arc_render_create(int width, int height, int visible)
     r->w = width;
     r->h = height;
     r->visible = visible;
-    r->cam_yaw = 0.6;
-    r->cam_pitch = 0.32;
     r->cam_dist = 4.0;
+    arc_render_set_view(r, 0);
 
     if (SDL_InitSubSystem(SDL_INIT_VIDEO) != 0) {
         free(r);
@@ -607,6 +709,14 @@ int arc_render_keys(arc_renderer *r, int *keys, int max)
 void arc_render_set_title(arc_renderer *r, const char *title)
 {
     SDL_SetWindowTitle(r->win, title);
+}
+
+void arc_render_set_view(arc_renderer *r, int preset)
+{
+    static const double YAW[3] = { 0.5, 1.4, 2.6 };
+    r->view = ((preset % 3) + 3) % 3;
+    r->cam_yaw = YAW[r->view];
+    r->cam_pitch = 0.3;
 }
 
 /* ------------------------------------------------------------------------ */
