@@ -42,6 +42,7 @@ def main():
     p.add_argument("--record", type=Path, default=None, help="write a GIF instead of opening a window")
     p.add_argument("--seconds", type=float, default=20.0, help="recording length")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--view", type=int, default=0, help="camera: 0 behind, 1 side, 2 front")
     args = p.parse_args()
 
     cfg = TaskConfig(curriculum=False, difficulty=args.difficulty, max_steps=10**9)
@@ -49,6 +50,8 @@ def main():
     arc_env: ArcVecEnv = env.venv
     task = arc_env.task
     obs = env.reset()
+    env.render()
+    arc_env._view.renderer.set_view(args.view)
 
     if args.record:
         frames = []
