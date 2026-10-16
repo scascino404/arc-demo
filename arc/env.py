@@ -35,7 +35,7 @@ class TaskConfig:
     checkpoint_radius: float = 0.4
     checkpoint_min_dist: float = 3.0
     checkpoint_max_dist: float = 6.0
-    border: float = 1.5               # keep checkpoints this far from the terrain edge
+    border: float = 1.5               # keep checkpoints this far from the boundary walls
     # rewards
     w_progress: float = 10.0          # per meter towards the checkpoint
     w_checkpoint: float = 10.0
@@ -52,9 +52,10 @@ class TaskConfig:
     level_down_steps: int = 300       # demote after falling this early without any checkpoint
 
 
-# heightmap sample grid around the torso, (forward, left) in meters
-_F = np.arange(-0.8, 1.21, 0.2)
-_L = np.arange(-0.6, 0.61, 0.2)
+# heightmap sample grid around the torso, (forward, left) in meters; it covers
+# the feet (about 0.9 m from the torso center) plus some look-ahead
+_F = np.arange(-1.0, 1.41, 0.2)
+_L = np.arange(-1.0, 1.01, 0.2)
 HEIGHT_OFFSETS = np.array([(f, l) for f in _F for l in _L])
 
 
@@ -161,7 +162,8 @@ class ArcTask:
                   - cfg.w_body_contact * (contacts[:, nl + 1] > 0))
 
         up_z = 1 - 2 * (root[:, 4] ** 2 + root[:, 5] ** 2)
-        out = np.any(np.abs(pos[:, :2]) > sim.half_extent - 0.5, axis=1)
+        # the boundary walls keep robots in; escaping anyway means a solver failure
+        out = np.any(np.abs(pos[:, :2]) > sim.half_extent + 0.5, axis=1)
         fell = (contacts[:, nl] > 0) | (up_z < 0.3) | (flags != 0) | out
         bad = ~np.all(np.isfinite(root), axis=1)
         fell |= bad

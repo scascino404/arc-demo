@@ -36,6 +36,9 @@ typedef struct {
     vec3 pos;          /* center, body frame */
     double radius;
     int touch;         /* substeps in contact during the last arc_world_step */
+    int anchored;      /* static friction anchor valid (in contact last substep) */
+    vec3 anchor;       /* ground point the sphere touched down on */
+    vec3 anchor_n;     /* contact normal at the anchor */
 } arc_sphere;
 
 typedef struct {

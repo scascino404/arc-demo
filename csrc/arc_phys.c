@@ -5,7 +5,7 @@
  *   1. integrate velocities and positions (gravity, gyroscopic term),
  *   2. solve position constraints once, Gauss-Seidel: joint drives, joint
  *      limits, hinge axis alignment, joint attachment, terrain contacts
- *      (with static and kinetic friction),
+ *      (with anchored static and kinetic friction),
  *   3. derive velocities from the position change,
  *   4. solve velocity constraints: drive damping and removal of the normal
  *      contact velocity (restitution 0).
@@ -54,6 +54,7 @@ int arc_add_sphere(arc_world *w, int body, vec3 local_pos, double radius)
     s->pos = local_pos;
     s->radius = radius;
     s->touch = 0;
+    s->anchored = 0;
     return w->n_spheres++;
 }
 
@@ -264,6 +265,35 @@ static void solve_point(arc_body *b1, vec3 r1, arc_body *b2, vec3 r2, vec3 d)
 }
 
 /*
+ * Rigid angular constraint solved as a 3x3 block: afterwards b1 has rotated
+ * by exactly rot relative to b2 (to first order). A one-direction solve
+ * leaks rotation into other axes when the world inertia is anisotropic,
+ * e.g. spinning a slender leg segment about its own axis.
+ */
+static void solve_rot_block(arc_body *b1, arc_body *b2, vec3 rot)
+{
+    double K[3][3] = { { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 } };
+    vec3 p;
+    int k;
+    if (v3_len2(rot) < 1e-24)
+        return;
+    for (k = 0; k < 3; ++k) {
+        vec3 e = v3(k == 0, k == 1, k == 2), col = v3(0, 0, 0);
+        if (b1)
+            col = v3_add(col, inv_inertia_world(b1, e));
+        if (b2)
+            col = v3_add(col, inv_inertia_world(b2, e));
+        K[0][k] = col.x;
+        K[1][k] = col.y;
+        K[2][k] = col.z;
+    }
+    if (!solve3((const double (*)[3])K, rot, &p))
+        return;
+    apply_rot_impulse(b1, p);
+    apply_rot_impulse(b2, v3_neg(p));
+}
+
+/*
  * Angular constraint: rotate b1 by the rotation vector rot relative to b2.
  * The impulse is capped at max_dl. Returns the applied impulse vector
  * (acting on b1; b2 receives its opposite).
@@ -345,14 +375,14 @@ static void solve_joint_positions(arc_world *w, arc_joint *j, double h)
         phi = arc_joint_angle(w, j);
         a1 = q_rotate(parent_q(bp), j->a1);
         if (phi < j->lo)
-            solve_rot(bp, bc, v3_scale(a1, phi - j->lo), 0.0, h, 1e30);
+            solve_rot_block(bp, bc, v3_scale(a1, phi - j->lo));
         else if (phi > j->hi)
-            solve_rot(bp, bc, v3_scale(a1, phi - j->hi), 0.0, h, 1e30);
+            solve_rot_block(bp, bc, v3_scale(a1, phi - j->hi));
     }
 
     /* hinge axes alignment */
     a1 = q_rotate(parent_q(bp), j->a1);
-    solve_rot(bp, bc, v3_cross(a1, q_rotate(bc->q, j->a2)), 0.0, h, 1e30);
+    solve_rot_block(bp, bc, v3_cross(a1, q_rotate(bc->q, j->a2)));
 
     /* attachment */
     r1 = q_rotate(parent_q(bp), j->r1);
@@ -389,42 +419,60 @@ static void solve_joint_velocities(arc_world *w, arc_joint *j, double h)
 /* ------------------------------------------------------------------------ */
 /* Contacts */
 
-static void solve_contact(arc_world *w, int bi, vec3 point, vec3 n, double depth, double h)
+/* Normal contact: push the point out of the terrain and record the contact
+ * for the velocity pass. Returns the normal impulse. */
+static double solve_contact(arc_world *w, int bi, vec3 point, vec3 n, double depth, double h)
 {
     arc_body *b = &w->bodies[bi];
-    vec3 local, r, p_now, p_prev, dp, dpt;
-    double ln, lt, wt, dpt_len;
-
-    local = q_inv_rotate(b->q, v3_sub(point, b->x));
-    r = v3_sub(point, b->x);
-    ln = solve_pos(b, r, 0, r, v3_scale(n, depth), 0.0, h);
-
-    /* Friction at position level (Macklin et al. 2014): undo the tangential
-     * motion of the contact point during this substep when it can be held by
-     * mu_s * normal impulse, else undo the part allowed by mu_d. Clamping
-     * (instead of all-or-nothing) lets the contacts of a body share the load
-     * when Gauss-Seidel distributes the normal impulse unevenly. */
-    p_now = v3_add(b->x, q_rotate(b->q, local));
-    p_prev = v3_add(b->x_prev, q_rotate(b->q_prev, local));
-    dp = v3_sub(p_now, p_prev);
-    dpt = v3_madd(dp, n, -v3_dot(dp, n));
-    dpt_len = v3_len(dpt);
-    if (dpt_len > 1e-12) {
-        r = v3_sub(p_now, b->x);
-        wt = w_pos(b, r, v3_scale(dpt, 1.0 / dpt_len));
-        lt = dpt_len / wt;
-        if (lt > w->mu_static * ln)
-            dpt = v3_scale(dpt, arc_min(w->mu_dynamic * ln / lt, 1.0));
-        solve_pos(b, r, 0, r, v3_neg(dpt), 0.0, h);
-    }
-
+    vec3 r = v3_sub(point, b->x);
+    double ln = solve_pos(b, r, 0, r, v3_scale(n, depth), 0.0, h);
     if (w->n_contacts < ARC_MAX_CONTACTS) {
         arc_contact *c = &w->contacts[w->n_contacts++];
         c->body = bi;
-        c->local = local;
+        c->local = q_inv_rotate(b->q, r);
         c->n = n;
         c->lambda_n = ln;
     }
+    return ln;
+}
+
+/*
+ * Friction at position level with a persistent anchor per sphere: the
+ * ground point where the sphere touched down. The tangential offset of the
+ * current contact point from the anchor is corrected when mu_s * normal
+ * impulse can hold it; otherwise the correction is clamped to mu_d * normal
+ * impulse (Macklin et al. 2014) and the anchor slides along. Undoing only
+ * the motion of the current substep (instead of returning to the anchor)
+ * lets feet creep when the joints keep pushing them sideways, and lets
+ * spheres roll away.
+ */
+static void solve_friction(arc_world *w, arc_sphere *s, vec3 n, double ln, double h)
+{
+    arc_body *b = &w->bodies[s->body];
+    vec3 c = v3_add(b->x, q_rotate(b->q, s->pos));
+    vec3 p = v3_madd(c, n, -s->radius), e, r;
+    double len, wt, lt, frac = 1.0;
+
+    if (!s->anchored || v3_dot(n, s->anchor_n) < 0.9) {
+        /* touch down: anchor where the contact point was at the substep start */
+        vec3 c0 = v3_add(b->x_prev, q_rotate(b->q_prev, s->pos));
+        s->anchor = v3_madd(c0, n, -s->radius);
+        s->anchor_n = n;
+        s->anchored = 1;
+    }
+    e = v3_sub(p, s->anchor);
+    e = v3_madd(e, n, -v3_dot(e, n));
+    len = v3_len(e);
+    if (len < 1e-12)
+        return;
+    r = v3_sub(p, b->x);
+    wt = w_pos(b, r, v3_scale(e, 1.0 / len));
+    lt = len / wt;
+    if (lt > w->mu_static * ln) {
+        frac = arc_min(w->mu_dynamic * ln / lt, 1.0);
+        s->anchor = v3_madd(s->anchor, e, 1.0 - frac);
+    }
+    solve_pos(b, r, 0, r, v3_scale(e, -frac), 0.0, h);
 }
 
 /* Collides one sphere with the column grid, solving each contact at once. */
@@ -432,8 +480,9 @@ static void collide_sphere(arc_world *w, arc_sphere *s, double h)
 {
     const arc_terrain *t = &w->terrain;
     arc_body *b = &w->bodies[s->body];
-    double rad = s->radius;
-    vec3 c = v3_add(b->x, q_rotate(b->q, s->pos));
+    double rad = s->radius, ln = 0.0;
+    vec3 c = v3_add(b->x, q_rotate(b->q, s->pos)), n_max = v3(0.0, 0.0, 1.0);
+    double depth_max = 0.0;
     int ix0 = (int)floor((c.x - rad - t->ox) / t->cell);
     int ix1 = (int)floor((c.x + rad - t->ox) / t->cell);
     int iy0 = (int)floor((c.y - rad - t->oy) / t->cell);
@@ -475,10 +524,18 @@ static void collide_sphere(arc_world *w, arc_sphere *s, double h)
                 n = v3(0.0, 0.0, 1.0);
                 depth = top - c.z + rad;
             }
-            solve_contact(w, s->body, v3_madd(c, n, -rad), n, depth, h);
+            ln += solve_contact(w, s->body, v3_madd(c, n, -rad), n, depth, h);
+            if (depth > depth_max) {
+                depth_max = depth;
+                n_max = n;
+            }
             touched = 1;
         }
     }
+    if (touched)
+        solve_friction(w, s, n_max, ln, h);
+    else
+        s->anchored = 0;
     s->touch += touched;
 }
 
@@ -495,7 +552,6 @@ static void solve_contact_velocities(arc_world *w)
         /* restitution 0: remove the normal velocity, including the
          * separating velocity introduced by the position correction */
         apply_vel_impulse(b, r, v3_scale(c->n, -vn / w_pos(b, r, c->n)));
-
     }
 }
 
@@ -632,8 +688,10 @@ void arc_world_set_pose(arc_world *w, vec3 pos, quat q, const double *angles)
         b->v = v3(0.0, 0.0, 0.0);
         b->w = v3(0.0, 0.0, 0.0);
     }
-    for (i = 0; i < w->n_spheres; ++i)
+    for (i = 0; i < w->n_spheres; ++i) {
         w->spheres[i].touch = 0;
+        w->spheres[i].anchored = 0;
+    }
     w->n_contacts = 0;
     w->unstable = 0;
 }

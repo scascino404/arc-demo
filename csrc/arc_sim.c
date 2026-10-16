@@ -81,7 +81,7 @@ void arc_sim_robot_info(const arc_sim *s, double *default_angles, double *lo, do
 static void reset_world(const arc_sim *s, arc_world *w, unsigned int seed, double difficulty)
 {
     arc_rng rng;
-    double angles[ARC_ROBOT_JOINTS], ground = -1e30, yaw, x, y;
+    double angles[ARC_ROBOT_JOINTS], ground = -1e30, yaw, x, y, reach;
     int i;
 
     arc_rng_seed(&rng, seed);
@@ -94,8 +94,9 @@ static void reset_world(const arc_sim *s, arc_world *w, unsigned int seed, doubl
                               s->info.lo[i], s->info.hi[i]);
     yaw = arc_rng_range(&rng, -ARC_PI, ARC_PI);
     /* highest column under the robot's footprint */
-    for (x = -0.7; x <= 0.7; x += 0.5 * s->cell)
-        for (y = -0.7; y <= 0.7; y += 0.5 * s->cell)
+    reach = s->info.footprint + 0.1;
+    for (x = -reach; x <= reach; x += 0.5 * s->cell)
+        for (y = -reach; y <= reach; y += 0.5 * s->cell)
             ground = arc_max(ground, arc_terrain_height(&w->terrain, x, y));
     arc_world_set_pose(w, v3(0.0, 0.0, ground + s->info.stand_height + 0.03),
                        q_axis_angle(v3(0.0, 0.0, 1.0), yaw), angles);

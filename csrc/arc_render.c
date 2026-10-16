@@ -166,7 +166,10 @@ static void build_terrain(arc_renderer *r, const arc_terrain *t)
             double h = arc_terrain_cell(t, ix, iy), n;
             double x0 = t->ox + ix * t->cell, x1 = x0 + t->cell;
             double y0 = t->oy + iy * t->cell, y1 = y0 + t->cell;
-            double c = 0.84 + 0.10 * cell_hash(ix, iy) + 0.25 * arc_clamp(h, -0.2, 0.4);
+            /* per-block variation plus a faint checkerboard, so motion stays
+             * visible on flat ground */
+            double c = 0.80 + 0.07 * cell_hash(ix, iy) + 0.06 * ((ix + iy) & 1)
+                       + 0.25 * arc_clamp(h, -0.2, 0.4);
             int inside = ix >= 0 && iy >= 0 && ix < t->nx && iy < t->ny;
             c = arc_clamp(c, 0.6, 0.98);
             glColor3d(c, c * 0.975, c * 0.94);
@@ -506,7 +509,7 @@ arc_renderer *arc_render_create(int width, int height, int visible)
     r->visible = visible;
     r->cam_yaw = 0.6;
     r->cam_pitch = 0.32;
-    r->cam_dist = 3.2;
+    r->cam_dist = 4.0;
 
     if (SDL_InitSubSystem(SDL_INIT_VIDEO) != 0) {
         free(r);

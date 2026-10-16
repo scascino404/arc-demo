@@ -8,6 +8,7 @@
 #include <string.h>
 #include "../arc_sim.h"
 #include "../arc_rng.h"
+#include "../arc_terrain.h"
 
 #define DT (1.0 / 30.0)
 #define SUBSTEPS 20
@@ -54,15 +55,17 @@ static void test_stand(void)
     printf("  stand height %.3f m, mass %.1f kg\n", misc[0], misc[1]);
     reset_all(s, 1, 0.0);
     memcpy(targets, def, sizeof(def));
-    for (i = 0; i < 150; ++i) {
+    /* the torso bobs on the compliant legs for a few seconds, then must be
+     * completely still: feet anchored, drives holding */
+    for (i = 0; i < 240; ++i) {
         arc_sim_step(s, targets);
         arc_sim_observe(s, root, 0, contacts, &flags);
-        if (i >= 90)
+        if (i >= 180)
             maxv = arc_max(maxv, sqrt(root[7] * root[7] + root[8] * root[8] + root[9] * root[9]));
     }
     check(!flags, "stable", flags, 0);
     check(root[2] > 0.8 * misc[0], "torso stays up (m)", root[2], 0.8 * misc[0]);
-    check_below("torso speed after settling (m/s)", maxv, 0.01);
+    check_below("torso speed after settling (m/s)", maxv, 2e-3);
     check(contacts[0] > 0.99 && contacts[1] > 0.99 && contacts[2] > 0.99 && contacts[3] > 0.99,
           "all feet in contact", contacts[0], 1.0);
     check_below("no torso contact", contacts[ARC_ROBOT_LEGS], 0.0);
@@ -139,8 +142,32 @@ static void test_determinism(void)
     arc_sim_destroy(b);
 }
 
+/* A ball thrown at the boundary wall must stay inside the terrain. */
+static void test_walls(void)
+{
+    arc_world w;
+    arc_rng rng;
+    double r = 0.1, edge;
+    printf("boundary walls\n");
+    arc_world_init(&w);
+    arc_rng_seed(&rng, 9);
+    arc_terrain_generate(&w.terrain, 32, 0.4, 0.5, &rng);
+    edge = w.terrain.ox + w.terrain.nx * w.terrain.cell;
+    arc_add_body(&w, 1.0, arc_inertia_sphere(1.0, r), v3(edge - 1.0, 0.0, 1.0), q_identity());
+    arc_add_sphere(&w, 0, v3(0, 0, 0), r);
+    w.bodies[0].v = v3(8.0, 0.0, 0.0);
+    {
+        int i;
+        for (i = 0; i < 90; ++i)
+            arc_world_step(&w, DT, SUBSTEPS);
+    }
+    check(w.terrain.outside > 0.9, "wall above the terrain (m)", w.terrain.outside, 0.9);
+    check_below("ball stays inside (x - edge, m)", w.bodies[0].x.x + r - edge, 1e-3);
+}
+
 int main(void)
 {
+    test_walls();
     test_stand();
     test_random();
     test_determinism();

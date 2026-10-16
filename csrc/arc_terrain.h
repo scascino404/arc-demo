@@ -11,7 +11,8 @@
  * Fills t with an n x n grid of columns centered on the origin: smooth hills
  * plus per-column jitter, quantized into steps. difficulty in [0, 1] scales
  * every height (0 gives flat ground). Heights are shifted so that the
- * column at the origin is at z = 0.
+ * column at the origin is at z = 0. The columns outside the grid form a
+ * wall 1 m above the highest column, which keeps robots inside.
  */
 void arc_terrain_generate(arc_terrain *t, int n, double cell, double difficulty, arc_rng *rng);
 

@@ -9,6 +9,7 @@ from gymnasium.utils.env_checker import check_env as gym_check_env
 from stable_baselines3.common.env_checker import check_env as sb3_check_env
 
 from arc import ArcEnv, ArcVecEnv, TaskConfig
+from arc.env import HEIGHT_OFFSETS
 
 
 def test_gymnasium_api():
@@ -22,13 +23,13 @@ def test_obs_at_rest_is_sane():
     env = ArcVecEnv(4, TaskConfig(curriculum=False), seed=0)
     obs = env.reset()
     assert obs.shape == (4, env.task.obs_size) and np.all(np.isfinite(obs))
-    for _ in range(30):
+    for _ in range(180):  # the torso bobs on the legs for a few seconds
         obs, *_ = env.step(np.zeros((4, 12), dtype=np.float32))
     # standing still on flat ground: gravity points down in body frame,
     # small velocities, all feet touching, flat heightmap
     assert np.allclose(obs[:, :3], [0, 0, -1], atol=0.05)
     assert np.abs(obs[:, 3:9]).max() < 0.1
-    nh = 77
+    nh = len(HEIGHT_OFFSETS)
     assert np.abs(obs[:, -4 - nh:-4]).max() < 0.1
     assert np.all(obs[:, -4:] > 0.99)
     env.close()

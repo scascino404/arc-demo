@@ -1,7 +1,7 @@
 # arc-demo
 
-A quadruped learns to cross rough block terrain and reach randomly placed
-checkpoints, inspired by Embark Studios'
+A spider-like quadruped learns to cross rough block terrain and reach
+randomly placed checkpoints, inspired by Embark Studios'
 [Transforming animation with machine learning](https://medium.com/embarkstudios/transforming-animation-with-machine-learning-27ac694590c).
 
 - `csrc/`: a small C89 physics engine (substepped XPBD), the robot, the terrain
@@ -27,10 +27,11 @@ uv run pytest   # environment tests
 
 ```sh
 bin/arcview                                   # physics viewer, no learning
+uv run python scripts/train.py --name terrain --steps 40e6   # terrain curriculum
 uv run python scripts/train.py --name flat --steps 10e6 --difficulty 0
-uv run python scripts/train.py --name terrain --steps 40e6 --resume runs/flat
 uv run python scripts/enjoy.py runs/terrain --difficulty 0.6
 uv run python scripts/enjoy.py runs/terrain --record out/terrain.gif
+uv run python scripts/evaluate.py runs/terrain
 uv run tensorboard --logdir runs
 ```
 
@@ -54,12 +55,16 @@ iteration per substep.
   inertia), limits, and a PD drive implemented as a compliant angular
   constraint (stiffness = 1/compliance) whose impulse is capped by the motor
   torque limit, plus velocity-level damping.
+- Rigid angular corrections (axis alignment, limits) are 3x3 block solves
+  too, so slender segments do not spin up about their long axis.
 - Collision geometry is spheres attached to bodies, colliding only with the
-  terrain, a grid of axis-aligned columns. Contacts are re-detected every
+  terrain, a grid of axis-aligned columns surrounded by boundary walls. Contacts are re-detected every
   substep. Edges buried by an equal or higher neighbour are skipped, so
   spheres roll across seams without bumps.
-- Friction is solved at position level, static or clamped kinetic
-  (Macklin et al. 2014); normal contact velocity is removed (restitution 0),
+- Friction is solved at position level against a persistent per-sphere
+  anchor (the touch-down point), static or clamped kinetic
+  (Macklin et al. 2014), so planted feet neither creep nor roll; normal
+  contact velocity is removed (restitution 0),
   which also discards the separating velocity of penetration corrections,
   so the policy cannot pump energy out of the contact solver.
 - Worlds whose state becomes non-finite or absurdly fast are flagged
@@ -67,16 +72,26 @@ iteration per substep.
 - A world is a fixed-capacity struct with no pointers: copyable, and
   stepping is deterministic and independent of the thread count.
 
+### Robot (`csrc/arc_robot.c`)
+
+A 21.6 kg spider-like quadruped: a low torso and four legs splayed at 45
+degrees, each with hip yaw, hip pitch and knee joints (12 PD-driven joints,
+200 N m/rad, 80 N m limit). In the default stance the knees are well above
+the torso and the shins come down steeply, feet about 0.9 m from the center.
+
 ### Task (`arc/env.py`)
 
 - Actions: 12 joint targets as offsets from the default stance
   (0.6 rad per unit action), tracked by the PD drives.
 - Observations (body or heading frame): gravity direction, linear and
   angular velocity, joint angles and rates, previous action, direction and
-  distance to the checkpoint, a 11x7 heightmap around the torso, foot
+  distance to the checkpoint, a 13x11 heightmap around the torso, foot
   contacts.
 - Reward: progress towards the checkpoint, a bonus per checkpoint, small
   penalties for joint work, action changes and knee/shin contacts; falling
   (torso contact, tipping over) ends the episode with a penalty.
-- Curriculum: each world has a terrain level that rises after episodes
-  with 3+ checkpoints and drops after early falls.
+- Curriculum: each world has its own terrain level (0 = flat to 1, in steps
+  of 0.1, scaling hills, bumps and block jitter). It rises after episodes
+  with 3+ checkpoints and drops after falls in the first 10 s without any
+  checkpoint, so the population spreads around the edge of what the policy
+  can do (as in Rudin et al. 2021, "Learning to Walk in Minutes").
