@@ -1,6 +1,7 @@
 """Train a PPO policy for the checkpoint task.
 
-    uv run python scripts/train.py --name flat --steps 20_000_000
+    uv run python scripts/train.py --name terrain --steps 40e6
+    uv run python scripts/train.py --name terrain --steps 10e6 --resume runs/terrain
 
 Outputs go to runs/<name>/: final model.zip + vecnormalize.pkl, periodic
 checkpoints, and TensorBoard logs (uv run tensorboard --logdir runs).
@@ -19,26 +20,6 @@ from stable_baselines3.common.vec_env import VecMonitor, VecNormalize
 
 from arc import ArcVecEnv, TaskConfig
 from arc.runs import default_threads, load_model, load_normalize, save_run
-
-
-def use_bf16_update(policy) -> None:
-    """Runs the hidden layers of the policy and value networks in bfloat16
-    (autocast over fp32 weights) while gradients are enabled, i.e. in the PPO
-    update, where these matmuls are most of the time. Rollouts, the action
-    distribution and the losses stay fp32. On CPUs with native bf16 (AVX512_BF16
-    or AMX) the update gets ~1.7x faster, but in 6M-step runs the policy learned
-    ~20% less per step, which about cancels the gain."""
-    extractor = policy.mlp_extractor
-    forward = extractor.forward
-
-    def mixed(features):
-        if not torch.is_grad_enabled():
-            return forward(features)
-        with torch.autocast("cpu", dtype=torch.bfloat16):
-            latent_pi, latent_vf = forward(features)
-        return latent_pi.float(), latent_vf.float()
-
-    extractor.forward = mixed
 
 
 class TaskStats(BaseCallback):
@@ -92,7 +73,6 @@ def main():
     p.add_argument("--difficulty", type=float, default=None,
                    help="fixed terrain difficulty (disables the curriculum)")
     p.add_argument("--max-difficulty", type=float, default=1.0)
-    p.add_argument("--bf16", action="store_true", help="bfloat16 matmuls in the PPO update")
     p.add_argument("--resume", type=Path, default=None,
                    help="directory with model.zip and vecnormalize.pkl to continue from")
     p.add_argument("--seed", type=int, default=0)
@@ -130,9 +110,6 @@ def main():
             seed=args.seed,
             verbose=1,
         )
-
-    if args.bf16:
-        use_bf16_update(model.policy)
 
     stats = TaskStats(out, save_every=2_000_000, venv=env)
     try:
