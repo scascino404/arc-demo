@@ -1,5 +1,7 @@
 # arc-demo
 
+![The trained robot walking to checkpoints over rough terrain](docs/leaper.gif)
+
 A four-legged robot spider, modelled on the leaper from ARC Raiders, learns
 by reinforcement learning to walk over rough block terrain and reach
 checkpoints placed at random around it. It has to look where it goes: it
