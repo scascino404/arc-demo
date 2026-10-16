@@ -192,7 +192,7 @@ class Renderer:
         img_ptr = None
         if rgb:
             w, h = self.size()
-            img = np.zeros((h, w, 3), dtype=np.uint8)
+            img = np.empty((h, w, 3), dtype=np.uint8)
             img_ptr = img.ctypes.data
         m_ptr, n = None, 0
         if markers is not None and len(markers):

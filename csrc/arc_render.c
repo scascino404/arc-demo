@@ -10,10 +10,12 @@
  * one shader. Glowing parts get additive halos, and a vignette darkens the
  * frame corners.
  *
- * Geometry lives in display lists: the terrain (rebuilt when it changes)
- * and one list per robot visual in its body frame (rebuilt when the
- * visuals change). The view matrix is kept in GL_PROJECTION, so that
- * gl_ModelViewMatrix maps object to world space in the shaders.
+ * Geometry lives in display lists: the terrain (rebuilt when it changes),
+ * one list per robot visual in its body frame (rebuilt when the visuals
+ * change) and the checkpoint ring (rebuilt when its radius changes). The
+ * view matrix is kept in GL_PROJECTION, so that gl_ModelViewMatrix maps
+ * object to world space in the shaders. Uniforms that only depend on the
+ * look or the terrain are set when the program or the terrain is built.
  * Offscreen rendering draws into a framebuffer object of a hidden window.
  */
 #include <stdio.h>
@@ -31,6 +33,7 @@
 #define LAMP_GRID 3             /* LAMP_GRID^2 unseen lamps light the arena from above */
 #define N_LAMPS (LAMP_GRID * LAMP_GRID) /* also hardcoded in SCENE_FS */
 #define LAMP_HEIGHT 3.0         /* above the highest column under the lamp (m) */
+#define BEACON_HEIGHT 1.1       /* checkpoint beacon above the ground (m) */
 
 /* OpenGL 2.0+ entry points, loaded at runtime */
 #define GL_FUNCS(X) \
@@ -72,11 +75,11 @@ GL_FUNCS(GL_DECLARE)
 
 typedef struct { double m[16]; } mat4; /* column-major, as OpenGL */
 
-/* uniform locations of the scene shader */
+/* locations of the scene shader's uniforms that change between frames or
+ * draws (the others are set once, see build_programs and update_terrain) */
 typedef struct {
-    GLint cam, sun_dir, sun_col, sky_col, gnd_col, fog_col, fog, floor_z;
-    GLint shadow, shadow_mat, shadow_bias, eye_pos, eye_dir, eye_col, lamp_pos, lamp_col;
-    GLint mat, aux, time, focus, fill_dir, fill_col, lamps_pos, lamps_col;
+    GLint cam, fog, time, focus, shadow_mat, eye_pos, eye_dir, eye_col, lamp_pos, lamp_col;
+    GLint mat, aux;
 } scene_uniforms;
 
 struct arc_renderer {
@@ -88,9 +91,9 @@ struct arc_renderer {
     GLuint prog_scene, prog_glow, prog_post;
     scene_uniforms su;
     GLint glow_cam, glow_fog, glow_beam, post_size;
-    GLuint list_sphere, list_terrain, list_visuals;
-    double terrain_key, floor_z;
-    vec3 lamps[N_LAMPS];            /* lamp positions, set with the terrain */
+    GLuint list_sphere, list_terrain, list_ring, list_visuals;
+    arc_terrain terrain_cache;      /* what list_terrain shows */
+    double ring_radius;             /* what list_ring shows */
     arc_visual vis_cache[ARC_MAX_VISUALS];
     int n_vis_cache;
     /* camera: orbit around a smoothed target, behind the robot's heading */
@@ -111,8 +114,7 @@ static const float FILL_COL[3] = { 0.16f, 0.13f, 0.11f };
 static const float LAMP_COL[3] = { 0.40f, 0.30f, 0.20f };     /* unseen lamps, warm */
 static const float SKY_COL[3] = { 0.090f, 0.100f, 0.125f };   /* ambient from above */
 static const float GND_COL[3] = { 0.030f, 0.030f, 0.034f };   /* ambient from below */
-static const float FOG_COL[3] = { 0.0f, 0.0f, 0.0f };
-static const float FOG_DENSITY = 0.05f;   /* per meter beyond the camera target's distance */
+static const float FOG_DENSITY = 0.05f;   /* into black, per meter beyond the camera target's distance */
 static const float EYE_LIGHT = 2.2f;                          /* eye spot intensity */
 static const float LAMP_ACTIVE[3] = { 1.00f, 0.42f, 0.08f };  /* checkpoint, seen */
 static const float LAMP_IDLE[3] = { 0.20f, 0.55f, 1.00f };    /* checkpoint, unseen */
@@ -132,15 +134,6 @@ static const float MATERIALS[][4] = {
 /* Shaders (GLSL 1.20). Sources are arrays of lines: ISO C90 limits string
  * literals to 509 characters. */
 
-#define SHADER_COMMON \
-    "#version 120\n", \
-    "float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }\n", \
-    "vec3 finish(vec3 c, float t) {\n", \
-    "    c = c * (2.51 * c + 0.03) / (c * (2.43 * c + 0.59) + 0.14);\n", /* ACES fit */ \
-    "    c = pow(clamp(c, 0.0, 1.0), vec3(1.0 / 2.2));\n", \
-    "    return c + (hash(gl_FragCoord.xy + fract(t) * 61.0) - 0.5) / 255.0;\n", /* dither */ \
-    "}\n"
-
 static const char *SCENE_VS[] = {
     "#version 120\n",
     "varying vec3 v_pos, v_nrm, v_obj;\n",
@@ -156,8 +149,8 @@ static const char *SCENE_VS[] = {
 };
 
 static const char *SCENE_FS[] = {
-    SHADER_COMMON,
-    "uniform vec3 u_cam, u_sun_dir, u_sun_col, u_sky_col, u_gnd_col, u_fog_col;\n",
+    "#version 120\n",
+    "uniform vec3 u_cam, u_sun_dir, u_sun_col, u_sky_col, u_gnd_col;\n",
     "uniform vec2 u_fog;\n",          /* density, distance where it starts */
     "uniform float u_floor_z, u_time;\n",
     "uniform vec2 u_focus;\n",        /* the key light falls off away from here */
@@ -171,6 +164,7 @@ static const char *SCENE_FS[] = {
     "uniform vec4 u_aux;\n",           /* terrain: grid origin, cell; else rim */
     "varying vec3 v_pos, v_nrm, v_obj;\n",
     "varying vec4 v_col;\n",
+    "float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }\n",
     "float noise(vec2 p) {\n",
     "    vec2 i = floor(p), f = fract(p);\n",
     "    f = f * f * (3.0 - 2.0 * f);\n",
@@ -250,9 +244,12 @@ static const char *SCENE_FS[] = {
     "    c += spec * (0.04 + 0.5 * pow(nv, 5.0)) * mix(u_gnd_col, 3.0 * u_sky_col, 0.5 + 0.5 * r.z);\n",
     "    c += rim * pow(nv, 4.0) * 0.6 * u_sky_col;\n",
     "    c = mix(c, a * u_mat.z, step(0.5, u_mat.z));\n", /* emissive */
-    "    c = mix(u_fog_col, c, exp(-u_fog.x * max(length(u_cam - v_pos) - u_fog.y, 0.0)));\n",
+    "    c *= exp(-u_fog.x * max(length(u_cam - v_pos) - u_fog.y, 0.0));\n", /* fog */
     "    c *= smoothstep(u_floor_z - 3.0, u_floor_z + 0.2, v_pos.z);\n", /* into the void */
-    "    gl_FragColor = vec4(finish(c, u_time), 1.0);\n",
+    "    c = c * (2.51 * c + 0.03) / (c * (2.43 * c + 0.59) + 0.14);\n", /* ACES fit */
+    "    c = pow(clamp(c, 0.0, 1.0), vec3(1.0 / 2.2));\n",
+    "    c += (hash(gl_FragCoord.xy + fract(u_time) * 61.0) - 0.5) / 255.0;\n", /* dither */
+    "    gl_FragColor = vec4(c, 1.0);\n",
     "}\n"
 };
 
@@ -346,6 +343,12 @@ static GLuint program(const char **vs, GLsizei nv, const char **fs, GLsizei nf)
     return p;
 }
 
+static void uniform_dir(GLuint p, const char *name, const float *d)
+{
+    vec3 n = v3_normalize(v3(d[0], d[1], d[2]));
+    p_glUniform3f(p_glGetUniformLocation(p, name), (float)n.x, (float)n.y, (float)n.z);
+}
+
 static int build_programs(arc_renderer *r)
 {
     scene_uniforms *u = &r->su;
@@ -357,15 +360,24 @@ static int build_programs(arc_renderer *r)
         return 0;
     p = r->prog_scene;
 #define LOC(field, name) u->field = p_glGetUniformLocation(p, name)
-    LOC(cam, "u_cam"); LOC(sun_dir, "u_sun_dir"); LOC(sun_col, "u_sun_col");
-    LOC(sky_col, "u_sky_col"); LOC(gnd_col, "u_gnd_col"); LOC(fog_col, "u_fog_col");
-    LOC(fog, "u_fog"); LOC(floor_z, "u_floor_z"); LOC(shadow, "u_shadow");
-    LOC(shadow_mat, "u_shadow_mat"); LOC(shadow_bias, "u_shadow_bias"); LOC(eye_pos, "u_eye_pos");
-    LOC(eye_dir, "u_eye_dir"); LOC(eye_col, "u_eye_col"); LOC(lamp_pos, "u_lamp_pos");
-    LOC(lamp_col, "u_lamp_col"); LOC(mat, "u_mat"); LOC(aux, "u_aux"); LOC(time, "u_time");
-    LOC(focus, "u_focus"); LOC(fill_dir, "u_fill_dir"); LOC(fill_col, "u_fill_col");
-    LOC(lamps_pos, "u_lamps_pos"); LOC(lamps_col, "u_lamps_col");
+    LOC(cam, "u_cam"); LOC(fog, "u_fog"); LOC(time, "u_time"); LOC(focus, "u_focus");
+    LOC(shadow_mat, "u_shadow_mat"); LOC(eye_pos, "u_eye_pos"); LOC(eye_dir, "u_eye_dir");
+    LOC(eye_col, "u_eye_col"); LOC(lamp_pos, "u_lamp_pos"); LOC(lamp_col, "u_lamp_col");
+    LOC(mat, "u_mat"); LOC(aux, "u_aux");
 #undef LOC
+    /* the look: constant */
+    p_glUseProgram(p);
+    uniform_dir(p, "u_sun_dir", SUN_DIR);
+    uniform_dir(p, "u_fill_dir", FILL_DIR);
+    p_glUniform3fv(p_glGetUniformLocation(p, "u_sun_col"), 1, SUN_COL);
+    p_glUniform3fv(p_glGetUniformLocation(p, "u_fill_col"), 1, FILL_COL);
+    p_glUniform3fv(p_glGetUniformLocation(p, "u_lamps_col"), 1, LAMP_COL);
+    p_glUniform3fv(p_glGetUniformLocation(p, "u_sky_col"), 1, SKY_COL);
+    p_glUniform3fv(p_glGetUniformLocation(p, "u_gnd_col"), 1, GND_COL);
+    p_glUniform1i(p_glGetUniformLocation(p, "u_shadow"), 0);
+    p_glUniform2f(p_glGetUniformLocation(p, "u_shadow_bias"), 1.0f / SHADOW_SIZE,
+                  (float)(3.0 * SHADOW_RANGE / SHADOW_SIZE));
+    p_glUseProgram(0);
     r->glow_cam = p_glGetUniformLocation(r->prog_glow, "u_cam");
     r->glow_fog = p_glGetUniformLocation(r->prog_glow, "u_fog");
     r->glow_beam = p_glGetUniformLocation(r->prog_glow, "u_beam");
@@ -599,10 +611,8 @@ static void mesh_box(vec3 c, vec3 e)
     int face, ax, i, j, k;
     ext[0] = e.x; ext[1] = e.y; ext[2] = e.z;
     for (k = 0; k < 3; ++k) {
-        double q[6];
-        q[0] = -ext[k]; q[1] = -ext[k] + 0.3 * bevel; q[2] = -ext[k] + bevel;
-        q[3] = ext[k] - bevel; q[4] = ext[k] - 0.3 * bevel; q[5] = ext[k];
-        memcpy(s[k], q, sizeof(q));
+        s[k][0] = -ext[k]; s[k][1] = -ext[k] + 0.3 * bevel; s[k][2] = -ext[k] + bevel;
+        s[k][3] = ext[k] - bevel; s[k][4] = ext[k] - 0.3 * bevel; s[k][5] = ext[k];
     }
     for (face = 0; face < 6; ++face) {
         int a = face / 2, b = (a + 1) % 3, cc = (a + 2) % 3;
@@ -730,13 +740,18 @@ static void terrain_side(double x0, double y0, double x1, double y1, double zlo,
     glVertex3d(x0, y0, zhi);
 }
 
-static void build_terrain(arc_renderer *r, const arc_terrain *t)
+/* Recompiles the terrain list, and sets the scene shader's uniforms that
+ * depend on the terrain, when the terrain changes. */
+static void update_terrain(arc_renderer *r, const arc_terrain *t)
 {
     int ix, iy, k;
     double lo = 1e30, bottom;
+    float lamps[3 * N_LAMPS];
+    if (!memcmp(&r->terrain_cache, t, sizeof(*t)))
+        return;
+    r->terrain_cache = *t;
     for (k = 0; k < t->nx * t->ny; ++k)
         lo = arc_min(lo, t->h[k]);
-    r->floor_z = lo;
     bottom = lo - VOID_DEPTH;
     for (k = 0; k < N_LAMPS; ++k) {
         double x = t->ox + t->nx * t->cell * (k % LAMP_GRID + 0.5) / LAMP_GRID;
@@ -744,8 +759,14 @@ static void build_terrain(arc_renderer *r, const arc_terrain *t)
         for (dx = -1.0; dx <= 1.0; dx += 0.5 * t->cell)
             for (dy = -1.0; dy <= 1.0; dy += 0.5 * t->cell)
                 top = arc_max(top, arc_terrain_height(t, x + dx, y + dy));
-        r->lamps[k] = v3(x, y, top + LAMP_HEIGHT);
+        lamps[3 * k] = (float)x;
+        lamps[3 * k + 1] = (float)y;
+        lamps[3 * k + 2] = (float)(top + LAMP_HEIGHT);
     }
+    p_glUseProgram(r->prog_scene);
+    p_glUniform1f(p_glGetUniformLocation(r->prog_scene, "u_floor_z"), (float)lo);
+    p_glUniform3fv(p_glGetUniformLocation(r->prog_scene, "u_lamps_pos"), N_LAMPS, lamps);
+    p_glUseProgram(0);
 
     glNewList(r->list_terrain, GL_COMPILE);
     glBegin(GL_QUADS);
@@ -781,15 +802,6 @@ static void build_terrain(arc_renderer *r, const arc_terrain *t)
     }
     glEnd();
     glEndList();
-}
-
-static double terrain_key(const arc_terrain *t)
-{
-    double k = t->nx * 1000.0 + t->ny + t->cell * 7.0 + t->outside * 13.0;
-    int i;
-    for (i = 0; i < t->nx * t->ny; ++i)
-        k += t->h[i] * (1.0 + (i % 97) * 0.01);
-    return k;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -829,22 +841,37 @@ static void draw_robot(const arc_renderer *r, const arc_world *w, int lit)
     }
 }
 
-static void draw_markers(const arc_renderer *r, const double *m, int n, int active, double time)
+/* Checkpoint beacon of marker m, bobbing above the ground. */
+static vec3 beacon(const double *m, double time)
+{
+    return v3(m[0], m[1], m[2] + BEACON_HEIGHT + 0.06 * sin(3.0 * time));
+}
+
+/* Checkpoints: a glowing beacon and a ring on the ground. */
+static void draw_markers(arc_renderer *r, const double *m, int n, int active, double time)
 {
     int i;
-    for (i = 0; i < n; ++i) {
-        vec3 base = v3(m[4 * i], m[4 * i + 1], m[4 * i + 2]);
-        double radius = m[4 * i + 3], bob = 0.06 * sin(3.0 * time);
+    for (i = 0; i < n; ++i, m += 4) {
+        vec3 p = beacon(m, time);
         const float *c = i == active ? LAMP_ACTIVE : LAMP_IDLE;
         float col[3];
         col[0] = (float)sqrt(c[0]); col[1] = (float)sqrt(c[1]); col[2] = (float)sqrt(c[2]);
         set_material(r, ARC_MAT_GLOW, col, 0.0);
         glPushMatrix();
-        glTranslated(base.x, base.y, base.z + 1.1 + bob);
+        glTranslated(p.x, p.y, p.z);
         glScaled(0.07, 0.07, 0.07);
         glCallList(r->list_sphere);
         glPopMatrix();
-        mesh_ring(v3(base.x, base.y, base.z + 0.01), v3(0, 0, 1), radius, 0.012);
+        if (m[3] != r->ring_radius) {
+            glNewList(r->list_ring, GL_COMPILE);
+            mesh_ring(v3(0, 0, 0), v3(0, 0, 1), m[3], 0.012);
+            glEndList();
+            r->ring_radius = m[3];
+        }
+        glPushMatrix();
+        glTranslated(m[0], m[1], m[2] + 0.01);
+        glCallList(r->list_ring);
+        glPopMatrix();
     }
 }
 
@@ -889,7 +916,7 @@ static void draw_glow(const arc_renderer *r, const arc_world *w, vec3 eye, mat4 
     }
     for (i = 0; i < n; ++i) {
         const float *c = i == active ? LAMP_ACTIVE : LAMP_IDLE;
-        vec3 p = v3(m[4 * i], m[4 * i + 1], m[4 * i + 2] + 1.1 + 0.06 * sin(3.0 * time));
+        vec3 p = beacon(m + 4 * i, time);
         glColor4f(c[0], c[1], c[2], 0.8f);
         billboard(v3_madd(p, v3_normalize(v3_sub(eye, p)), 0.3), right, up, 0.45);
     }
@@ -920,10 +947,12 @@ static void fullscreen(void)
     glEnd();
 }
 
-static void load_matrix(GLenum mode, mat4 m)
+/* The modelview matrix stays the identity between draws, and current. */
+static void set_projection(mat4 m)
 {
-    glMatrixMode(mode);
+    glMatrixMode(GL_PROJECTION);
     glLoadMatrixd(m.m);
+    glMatrixMode(GL_MODELVIEW);
 }
 
 /* ------------------------------------------------------------------------ */
@@ -1052,6 +1081,7 @@ static int create_shadow_map(arc_renderer *r)
 arc_renderer *arc_render_create(int width, int height, int visible)
 {
     arc_renderer *r = (arc_renderer *)calloc(1, sizeof(arc_renderer));
+    int msaa;
     if (!r)
         return 0;
     r->w = width;
@@ -1068,17 +1098,13 @@ arc_renderer *arc_render_create(int width, int height, int visible)
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
-    SDL_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, visible ? 1 : 0);
-    SDL_GL_SetAttribute(SDL_GL_MULTISAMPLESAMPLES, visible ? 4 : 0);
-    r->win = SDL_CreateWindow("arc", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, width, height,
-                              SDL_WINDOW_OPENGL | (visible ? SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI
-                                                           : SDL_WINDOW_HIDDEN));
-    if (!r->win) {
-        /* retry without multisampling */
-        SDL_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, 0);
-        SDL_GL_SetAttribute(SDL_GL_MULTISAMPLESAMPLES, 0);
+    /* windows get 4x multisampling if available; offscreen frames draw into the FBO */
+    for (msaa = visible ? 4 : 0; !r->win && msaa >= 0; msaa -= 4) {
+        SDL_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, msaa > 0);
+        SDL_GL_SetAttribute(SDL_GL_MULTISAMPLESAMPLES, msaa);
         r->win = SDL_CreateWindow("arc", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, width,
-                                  height, SDL_WINDOW_OPENGL | (visible ? SDL_WINDOW_RESIZABLE : SDL_WINDOW_HIDDEN));
+                                  height, SDL_WINDOW_OPENGL | (visible ? SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI
+                                                                       : SDL_WINDOW_HIDDEN));
     }
     if (!r->win || !(r->ctx = SDL_GL_CreateContext(r->win))) {
         arc_render_destroy(r);
@@ -1102,8 +1128,9 @@ arc_renderer *arc_render_create(int width, int height, int visible)
     glDisable(GL_CULL_FACE);
     if (visible)
         glEnable(GL_MULTISAMPLE);
-    r->list_sphere = glGenLists(2);
+    r->list_sphere = glGenLists(3);
     r->list_terrain = r->list_sphere + 1;
+    r->list_ring = r->list_sphere + 2;
     r->list_visuals = glGenLists(ARC_MAX_VISUALS);
     glNewList(r->list_sphere, GL_COMPILE);
     unit_sphere();
@@ -1118,7 +1145,7 @@ void arc_render_destroy(arc_renderer *r)
     if (r->ctx) {
         SDL_GL_MakeCurrent(r->win, r->ctx);
         if (r->list_sphere)
-            glDeleteLists(r->list_sphere, 2);
+            glDeleteLists(r->list_sphere, 3);
         if (r->list_visuals)
             glDeleteLists(r->list_visuals, ARC_MAX_VISUALS);
         if (p_glDeleteProgram) {
@@ -1192,10 +1219,8 @@ static void set_scene_uniforms(const arc_renderer *r, const arc_world *w, vec3 e
                                const double *markers, int n_markers, int active)
 {
     const scene_uniforms *u = &r->su;
-    vec3 sun = v3_normalize(v3(SUN_DIR[0], SUN_DIR[1], SUN_DIR[2]));
     vec3 eye_pos = v3(0, 0, -100), eye_dir = v3(1, 0, 0), lamp = v3(0, 0, -100);
-    vec3 fill = v3_normalize(v3(FILL_DIR[0], FILL_DIR[1], FILL_DIR[2]));
-    float eye_col[3] = { 0, 0, 0 }, lamp_col[3] = { 0, 0, 0 }, m[16], lamps[3 * N_LAMPS];
+    float eye_col[3] = { 0, 0, 0 }, lamp_col[3] = { 0, 0, 0 }, m[16];
     mat4 bias;
     int i;
 
@@ -1216,7 +1241,7 @@ static void set_scene_uniforms(const arc_renderer *r, const arc_world *w, vec3 e
     }
     if (markers && n_markers > 0) {
         const float *c = active == 0 ? LAMP_ACTIVE : LAMP_IDLE;
-        lamp = v3(markers[0], markers[1], markers[2] + 1.1);
+        lamp = v3(markers[0], markers[1], markers[2] + BEACON_HEIGHT);
         for (i = 0; i < 3; ++i)
             lamp_col[i] = (active == 0 ? 1.6f : 0.8f) * c[i];
     }
@@ -1229,32 +1254,15 @@ static void set_scene_uniforms(const arc_renderer *r, const arc_world *w, vec3 e
         m[i] = (float)shadow.m[i];
 
     p_glUniform3f(u->cam, (float)eye.x, (float)eye.y, (float)eye.z);
-    p_glUniform3f(u->sun_dir, (float)sun.x, (float)sun.y, (float)sun.z);
-    p_glUniform3f(u->sun_col, SUN_COL[0], SUN_COL[1], SUN_COL[2]);
-    p_glUniform3f(u->sky_col, SKY_COL[0], SKY_COL[1], SKY_COL[2]);
-    p_glUniform3f(u->gnd_col, GND_COL[0], GND_COL[1], GND_COL[2]);
-    p_glUniform3f(u->fog_col, FOG_COL[0], FOG_COL[1], FOG_COL[2]);
     p_glUniform2f(u->fog, FOG_DENSITY, (float)v3_len(v3_sub(eye, r->cam_target)));
-    p_glUniform1f(u->floor_z, (float)r->floor_z);
     p_glUniform1f(u->time, (float)w->time);
     p_glUniform2f(u->focus, (float)r->cam_target.x, (float)r->cam_target.y);
-    p_glUniform1i(u->shadow, 0);
     p_glUniformMatrix4fv(u->shadow_mat, 1, GL_FALSE, m);
-    p_glUniform2f(u->shadow_bias, 1.0f / SHADOW_SIZE, (float)(3.0 * SHADOW_RANGE / SHADOW_SIZE));
     p_glUniform3f(u->eye_pos, (float)eye_pos.x, (float)eye_pos.y, (float)eye_pos.z);
     p_glUniform3f(u->eye_dir, (float)eye_dir.x, (float)eye_dir.y, (float)eye_dir.z);
-    p_glUniform3f(u->eye_col, eye_col[0], eye_col[1], eye_col[2]);
+    p_glUniform3fv(u->eye_col, 1, eye_col);
     p_glUniform3f(u->lamp_pos, (float)lamp.x, (float)lamp.y, (float)lamp.z);
-    p_glUniform3f(u->lamp_col, lamp_col[0], lamp_col[1], lamp_col[2]);
-    p_glUniform3f(u->fill_dir, (float)fill.x, (float)fill.y, (float)fill.z);
-    p_glUniform3f(u->fill_col, FILL_COL[0], FILL_COL[1], FILL_COL[2]);
-    p_glUniform3f(u->lamps_col, LAMP_COL[0], LAMP_COL[1], LAMP_COL[2]);
-    for (i = 0; i < N_LAMPS; ++i) {
-        lamps[3 * i] = (float)r->lamps[i].x;
-        lamps[3 * i + 1] = (float)r->lamps[i].y;
-        lamps[3 * i + 2] = (float)r->lamps[i].z;
-    }
-    p_glUniform3fv(u->lamps_pos, N_LAMPS, lamps);
+    p_glUniform3fv(u->lamp_col, 1, lamp_col);
 }
 
 int arc_render_frame(arc_renderer *r, const arc_sim *s, int world,
@@ -1263,8 +1271,8 @@ int arc_render_frame(arc_renderer *r, const arc_sim *s, int world,
 {
     const arc_world *w = arc_sim_world(s, world);
     const arc_terrain *t = &w->terrain;
-    double key, yaw, near_plane = 0.05, far_plane = 120.0, aspect, top;
-    mat4 view, proj, shadow, identity;
+    double yaw, near_plane = 0.05, far_plane = 120.0, aspect, top;
+    mat4 view, proj, shadow;
     vec3 eye;
 
     handle_events(r);
@@ -1272,11 +1280,7 @@ int arc_render_frame(arc_renderer *r, const arc_sim *s, int world,
         return 0;
     SDL_GL_MakeCurrent(r->win, r->ctx);
 
-    key = terrain_key(t);
-    if (key != r->terrain_key) {
-        build_terrain(r, t);
-        r->terrain_key = key;
-    }
+    update_terrain(r, t);
     update_visuals(r, w);
     update_camera(r, w);
 
@@ -1291,8 +1295,6 @@ int arc_render_frame(arc_renderer *r, const arc_sim *s, int world,
     top = near_plane * tan(0.5 * 50.0 * ARC_PI / 180.0);
     proj = m4_frustum(-top * aspect, top * aspect, -top, top, near_plane, far_plane);
     shadow = shadow_matrix(r->cam_target);
-    memset(&identity, 0, sizeof(identity));
-    identity.m[0] = identity.m[5] = identity.m[10] = identity.m[15] = 1.0;
 
     /* shadow pass: terrain and robot, depth only */
     p_glBindFramebuffer(GL_FRAMEBUFFER, r->shadow_fbo);
@@ -1302,8 +1304,7 @@ int arc_render_frame(arc_renderer *r, const arc_sim *s, int world,
     glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
     glEnable(GL_POLYGON_OFFSET_FILL);
     glPolygonOffset(1.5f, 4.0f);
-    load_matrix(GL_PROJECTION, shadow);
-    load_matrix(GL_MODELVIEW, identity);
+    set_projection(shadow);
     glCallList(r->list_terrain);
     draw_robot(r, w, 0);
     glDisable(GL_POLYGON_OFFSET_FILL);
@@ -1314,7 +1315,7 @@ int arc_render_frame(arc_renderer *r, const arc_sim *s, int world,
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     /* scene */
-    load_matrix(GL_PROJECTION, m4_mul(proj, view));
+    set_projection(m4_mul(proj, view));
     p_glUseProgram(r->prog_scene);
     p_glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, r->shadow_tex);
@@ -1330,7 +1331,6 @@ int arc_render_frame(arc_renderer *r, const arc_sim *s, int world,
     draw_glow(r, w, eye, view, markers, markers ? n_markers : 0, active, w->time);
 
     /* vignette */
-    load_matrix(GL_PROJECTION, identity);
     glDisable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
     glBlendFunc(GL_DST_COLOR, GL_ZERO);
@@ -1342,14 +1342,21 @@ int arc_render_frame(arc_renderer *r, const arc_sim *s, int world,
     p_glUseProgram(0);
 
     if (rgb) {
-        int row, stride = r->w * 3;
+        /* RGBA is the driver's fast path (RGB gets converted pixel by pixel
+         * in the driver). Flip the rows and drop alpha here, copying 4 bytes
+         * per pixel of which the next pixel overwrites the last. */
+        int width = r->w, height = r->h, row, x;
         if (!r->scratch)
-            r->scratch = (unsigned char *)malloc((size_t)stride * r->h);
-        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+            r->scratch = (unsigned char *)malloc((size_t)width * height * 4);
         glReadBuffer(r->fbo ? GL_COLOR_ATTACHMENT0 : GL_BACK);
-        glReadPixels(0, 0, r->w, r->h, GL_RGB, GL_UNSIGNED_BYTE, r->scratch);
-        for (row = 0; row < r->h; ++row)
-            memcpy(rgb + (size_t)row * stride, r->scratch + (size_t)(r->h - 1 - row) * stride, (size_t)stride);
+        glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, r->scratch);
+        for (row = 0; row < height; ++row) {
+            const unsigned char *src = r->scratch + (size_t)(height - 1 - row) * width * 4;
+            unsigned char *dst = rgb + (size_t)row * width * 3;
+            for (x = 0; x < width - 1; ++x)
+                memcpy(dst + 3 * x, src + 4 * x, 4);
+            memcpy(dst + 3 * x, src + 4 * x, 3);
+        }
     }
     if (r->visible)
         SDL_GL_SwapWindow(r->win);
