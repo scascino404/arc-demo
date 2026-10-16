@@ -64,7 +64,6 @@ typedef struct {
     int body;
     vec3 local;        /* contact point, body frame */
     vec3 n;            /* terrain normal (pointing out of the terrain) */
-    double lambda_n;   /* normal impulse of the position solve */
 } arc_contact;
 
 enum {

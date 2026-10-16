@@ -53,11 +53,11 @@ static int in_void(const viewer *v)
 static void step(viewer *v)
 {
     int i;
-    if (v->random_actions && v->step % 3 == 0)
-        for (i = 0; i < NJ; ++i)
-            v->targets[i] = arc_rng_range(&v->rng, v->lo[i], v->hi[i]);
     if (!v->random_actions)
         memcpy(v->targets, v->def, sizeof(v->def));
+    else if (v->step % 3 == 0) /* new random targets at 10 Hz */
+        for (i = 0; i < NJ; ++i)
+            v->targets[i] = arc_rng_range(&v->rng, v->lo[i], v->hi[i]);
     arc_sim_step(v->sim, v->targets);
     ++v->step;
     if (in_void(v))

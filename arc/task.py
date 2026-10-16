@@ -24,7 +24,7 @@ class TaskConfig:
     # episode
     max_steps: int = 1000
     action_scale: float = 0.6         # rad per unit action, around the default stance
-    checkpoint_radius: float = 0.5       # torso center within this distance (drawn ring)
+    checkpoint_radius: float = 0.5    # torso center within this distance (drawn ring)
     checkpoint_min_dist: float = 3.0
     checkpoint_max_dist: float = 6.0
     border: float = 1.5               # keep checkpoints this far from the edge
@@ -66,8 +66,8 @@ class TaskConfig:
     level_down_steps: int = 300       # demote after falling this early without any checkpoint
 
 
-# termination causes reported in infos["cause"]
-CAUSES = ("", "flip", "beached", "unstable", "void")
+# termination causes reported in infos["cause"], in order of precedence
+CAUSES = ("", "unstable", "void", "flip", "beached")
 
 # heightmap sample grid around the torso, (forward, left) in meters; it covers
 # the feet (about 0.9 m from the torso center) plus some look-ahead
@@ -89,7 +89,6 @@ class ArcTask:
     def __init__(self, num_worlds: int, config: TaskConfig | None = None, threads: int = 1,
                  seed: int | None = None):
         self.cfg = cfg = config or TaskConfig()
-        self.n = num_worlds
         self.sim = Sim(num_worlds, cfg.dt, cfg.substeps, cfg.grid, cfg.cell, threads)
         self.nj = self.sim.num_joints
         self.rng = np.random.default_rng(seed)
@@ -105,7 +104,6 @@ class ArcTask:
         self.torso_steps = np.zeros(n, dtype=np.int64)
         self.steps = np.zeros(n, dtype=np.int64)
         self.checkpoints = np.zeros(n, dtype=np.int64)
-        self.ep_return = np.zeros(n)
         self.level = np.full(n, 0.0 if cfg.curriculum else cfg.difficulty)
         self.difficulty = self.level.copy()
         self._heights = np.empty((n, len(HEIGHT_OFFSETS)))
@@ -123,7 +121,6 @@ class ArcTask:
         self.torso_steps[ids] = 0
         self.steps[ids] = 0
         self.checkpoints[ids] = 0
-        self.ep_return[ids] = 0.0
         self.sim.observe()
         self._new_targets(ids)
 
@@ -151,7 +148,7 @@ class ArcTask:
         self.target_z[ids] = self.sim.terrain_at(ids, target)
         self.prev_dist[ids] = np.linalg.norm(target - pos, axis=1)
         self.prev_gaze[ids] = gaze_error(self.sim.rot[ids], pos, target)
-        self.in_view[ids] = self.prev_gaze[ids] < np.radians(self.cfg.fov)
+        self.in_view[ids] = self.prev_gaze[ids] < np.radians(cfg.fov)
 
     # -- stepping -----------------------------------------------------------
 
@@ -201,7 +198,7 @@ class ArcTask:
         flip = rot[:, 2, 2] < cfg.flip_up_z
         beached = self.torso_steps > cfg.beached_steps
         fell = flip | beached | void | bad
-        cause = np.select([bad, void, flip, beached], [3, 4, 1, 2], 0)
+        cause = np.select([bad, void, flip, beached], [1, 2, 3, 4], 0)  # index into CAUSES
         reward = np.where(fell, reward - cfg.w_fall, reward)
         reward = np.where(bad, -cfg.w_fall, reward)
 
@@ -209,7 +206,6 @@ class ArcTask:
         self.prev_gaze = gaze
         self.prev_action = a
         self.checkpoints += reached
-        self.ep_return += reward
         hit = np.flatnonzero(reached & ~fell)
         if len(hit):
             self._new_targets(hit)

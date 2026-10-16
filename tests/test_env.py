@@ -9,7 +9,13 @@ from gymnasium.utils.env_checker import check_env as gym_check_env
 from stable_baselines3.common.env_checker import check_env as sb3_check_env
 
 from arc import ArcEnv, ArcVecEnv, TaskConfig
+from arc.runs import MODEL, latest_checkpoint
 from arc.task import HEIGHT_OFFSETS
+
+
+def hold(n):
+    """Zero actions for n worlds: every joint holds the default stance."""
+    return np.zeros((n, 12), dtype=np.float32)
 
 
 def test_gymnasium_api():
@@ -24,7 +30,7 @@ def test_obs_at_rest_is_sane():
     obs = env.reset()
     assert obs.shape == (4, env.task.obs_size) and np.all(np.isfinite(obs))
     for _ in range(180):  # the torso bobs on the legs for a few seconds
-        obs, *_ = env.step(np.zeros((4, 12), dtype=np.float32))
+        obs, *_ = env.step(hold(4))
     # standing still on flat ground: gravity points down in body frame,
     # small velocities, all feet touching, flat heightmap
     assert np.allclose(obs[:, :3], [0, 0, -1], atol=0.05)
@@ -40,7 +46,7 @@ def test_auto_reset_and_terminal_obs():
     env = ArcVecEnv(3, cfg, seed=1)
     env.reset()
     for t in range(20):
-        obs, rew, done, infos = env.step(np.zeros((3, 12), dtype=np.float32))
+        obs, rew, done, infos = env.step(hold(3))
     assert done.all()
     for info in infos:
         assert info["TimeLimit.truncated"]
@@ -76,7 +82,7 @@ def test_void_terminates():
         return out
 
     sim.observe = observe_off_edge
-    _, rew, done, infos = env.step(np.zeros((2, 12), dtype=np.float32))
+    _, rew, done, infos = env.step(hold(2))
     assert not done[0]
     assert done[1] and infos[1]["fell"] and infos[1]["cause"] == "void"
     assert rew[1] < -env.task.cfg.w_fall + 1.0
@@ -108,7 +114,7 @@ def test_checkpoint_reached_moves_target():
     task.target[0] = task.sim.root[0, :2]
     task.prev_dist[0] = 0.5
     old = task.target[0].copy()
-    _, rew, _, _ = env.step(np.zeros((1, 12), dtype=np.float32))
+    _, rew, _, _ = env.step(hold(1))
     assert rew[0] > 0.8 * task.cfg.w_checkpoint
     assert task.checkpoints[0] == 1
     assert np.linalg.norm(task.target[0] - old) >= task.cfg.checkpoint_min_dist - 0.5
@@ -151,11 +157,11 @@ def test_hovering_near_a_checkpoint_costs():
     env.reset()
     task = env.task
     for _ in range(150):
-        env.step(np.zeros((4, 12), dtype=np.float32))
+        env.step(hold(4))
     # checkpoint just outside the radius, robot standing still
     task.target[:] = task.sim.root[:, :2] + [task.cfg.checkpoint_radius + 0.3, 0.0]
     task.prev_dist[:] = task.cfg.checkpoint_radius + 0.3
-    rewards = [env.step(np.zeros((4, 12), dtype=np.float32))[1] for _ in range(30)]
+    rewards = [env.step(hold(4))[1] for _ in range(30)]
     assert np.all(np.sum(rewards, axis=0) < 0)
     env.close()
 
@@ -167,7 +173,7 @@ def test_progress_reward_is_capped():
     task = env.task
     # pretend the robot covered 1 m in one step: worth only max_speed * dt
     task.prev_dist[0] += 1.0
-    _, rew, _, _ = env.step(np.zeros((1, 12), dtype=np.float32))
+    _, rew, _, _ = env.step(hold(1))
     assert rew[0] <= cfg.w_progress * cfg.max_speed * cfg.dt + 1e-6
     env.close()
 
@@ -199,7 +205,7 @@ def _standing_env(seed):
     env = ArcVecEnv(1, TaskConfig(curriculum=False), seed=seed)
     env.reset()
     for _ in range(150):
-        env.step(np.zeros((1, 12), dtype=np.float32))
+        env.step(hold(1))
     return env, env.task
 
 
@@ -218,7 +224,7 @@ def test_progress_pays_only_when_target_in_view():
     for angle in (0.0, np.pi):
         _place_target(task, angle, 3.0)
         task.prev_dist[0] += 0.03  # pretend the robot just walked 3 cm towards it
-        rewards[angle] = env.step(np.zeros((1, 12), dtype=np.float32))[1][0]
+        rewards[angle] = env.step(hold(1))[1][0]
     assert rewards[0.0] > rewards[np.pi] + 0.8 * task.cfg.w_progress * 0.03
     env.close()
 
@@ -227,7 +233,7 @@ def test_turning_towards_target_pays():
     env, task = _standing_env(9)
     _place_target(task, np.pi / 2, 3.0)
     task.prev_gaze[0] += 0.2  # pretend the eye just turned 0.2 rad towards it
-    rew = env.step(np.zeros((1, 12), dtype=np.float32))[1][0]
+    rew = env.step(hold(1))[1][0]
     assert rew > 0.8 * task.cfg.w_turn * 0.2 - task.cfg.w_time
     env.close()
 
@@ -235,16 +241,15 @@ def test_turning_towards_target_pays():
 def test_checkpoint_counts_only_when_seen():
     env, task = _standing_env(10)
     _place_target(task, np.pi, 0.3)  # right behind: not seen
-    env.step(np.zeros((1, 12), dtype=np.float32))
+    env.step(hold(1))
     assert task.checkpoints[0] == 0
     _place_target(task, 0.0, 0.3)  # right in front
-    env.step(np.zeros((1, 12), dtype=np.float32))
+    env.step(hold(1))
     assert task.checkpoints[0] == 1
     env.close()
 
 
 def test_latest_checkpoint(tmp_path):
-    from arc.runs import MODEL, latest_checkpoint
     assert latest_checkpoint(tmp_path) == tmp_path  # no checkpoints: the run itself
     for steps in (2_000_000, 10_000_000, 4_000_000):
         (tmp_path / "checkpoints" / f"step_{steps}").mkdir(parents=True)

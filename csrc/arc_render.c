@@ -1,23 +1,23 @@
 /*
  * arc_render.c - SDL2 + OpenGL 2.1 renderer with GLSL 1.20 shaders.
  *
- * Scene: an arena floating in pitch black void. One shadowed key
- * light (a 2048^2 shadow map following the camera), an unshadowed fill
- * light, hemisphere ambient, a grid of unseen lamps over the arena, a
- * spot light from the robot's eye, a point light from the checkpoint,
+ * Scene: an arena floating in a pitch black void. One shadowed key light
+ * (a 2048^2 shadow map following the camera), an unshadowed fill light,
+ * hemisphere ambient, a grid of unseen lamps over the arena, a spot light
+ * from the robot's eye, a point light from the checkpoint beacon,
  * exponential fog into the dark beyond the camera target, and filmic tone
- * mapping, all per pixel in
- * one shader. Glowing parts get additive halos, and a vignette darkens the
- * frame corners.
+ * mapping, all per pixel in one shader. Glowing parts get additive halos,
+ * and a vignette darkens the frame corners.
  *
- * Geometry lives in display lists: the terrain (rebuilt when it changes),
- * one list per robot visual in its body frame (rebuilt when the visuals
- * change) and the checkpoint ring (rebuilt when its radius changes). The
- * view matrix is kept in GL_PROJECTION, so that gl_ModelViewMatrix maps
- * object to world space in the shaders. Uniforms that only depend on the
- * look or the terrain are set when the program or the terrain is built.
- * Offscreen rendering draws into a multisampled framebuffer object of a
- * hidden window, resolved into a single-sampled one when read back.
+ * Geometry (built by arc_mesh) lives in display lists: the terrain
+ * (rebuilt when it changes), one list per robot visual in its body frame
+ * (rebuilt when the visuals change) and the checkpoint ring (rebuilt when
+ * its radius changes). The view matrix is kept in GL_PROJECTION, so that
+ * gl_ModelViewMatrix maps object to world space in the shaders. Uniforms
+ * that only depend on the look or the terrain are set when the program or
+ * the terrain is built. Offscreen rendering draws into a multisampled
+ * framebuffer object of a hidden window, resolved into a single-sampled
+ * one when read back.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,6 +25,7 @@
 #include <SDL.h>
 #include <GL/gl.h>
 #include <GL/glext.h>
+#include "arc_mesh.h"
 #include "arc_render.h"
 
 #define MAX_KEYS 32
@@ -69,7 +70,6 @@
     X(PFNGLCHECKFRAMEBUFFERSTATUSPROC, glCheckFramebufferStatus) \
     X(PFNGLGENRENDERBUFFERSPROC, glGenRenderbuffers) \
     X(PFNGLBINDRENDERBUFFERPROC, glBindRenderbuffer) \
-    X(PFNGLRENDERBUFFERSTORAGEPROC, glRenderbufferStorage) \
     X(PFNGLDELETERENDERBUFFERSPROC, glDeleteRenderbuffers) \
     X(PFNGLRENDERBUFFERSTORAGEMULTISAMPLEPROC, glRenderbufferStorageMultisample) \
     X(PFNGLBLITFRAMEBUFFERPROC, glBlitFramebuffer)
@@ -82,7 +82,7 @@ typedef struct { double m[16]; } mat4; /* column-major, as OpenGL */
 /* locations of the scene shader's uniforms that change between frames or
  * draws (the others are set once, see build_programs and update_terrain) */
 typedef struct {
-    GLint cam, fog, time, focus, shadow_mat, eye_pos, eye_dir, eye_col, lamp_pos, lamp_col;
+    GLint cam, fog, time, focus, shadow_mat, eye_pos, eye_dir, eye_col, beacon_pos, beacon_col;
     GLint mat, aux;
 } scene_uniforms;
 
@@ -116,13 +116,13 @@ static const float SUN_DIR[3] = { 0.48f, 0.30f, 0.82f };     /* towards the ligh
 static const float SUN_COL[3] = { 1.45f, 1.55f, 1.80f };
 static const float FILL_DIR[3] = { -0.48f, -0.30f, 0.45f };   /* opposite the key light */
 static const float FILL_COL[3] = { 0.16f, 0.13f, 0.11f };
-static const float LAMP_COL[3] = { 0.40f, 0.30f, 0.20f };     /* unseen lamps, warm */
+static const float LAMP_COL[3] = { 0.40f, 0.30f, 0.20f };     /* arena lamps, warm */
 static const float SKY_COL[3] = { 0.090f, 0.100f, 0.125f };   /* ambient from above */
 static const float GND_COL[3] = { 0.030f, 0.030f, 0.034f };   /* ambient from below */
 static const float FOG_DENSITY = 0.05f;   /* into black, per meter beyond the camera target's distance */
 static const float EYE_LIGHT = 2.2f;                          /* eye spot intensity */
-static const float LAMP_ACTIVE[3] = { 1.00f, 0.42f, 0.08f };  /* checkpoint, seen */
-static const float LAMP_IDLE[3] = { 0.20f, 0.55f, 1.00f };    /* checkpoint, unseen */
+static const float BEACON_SEEN[3] = { 1.00f, 0.42f, 0.08f };   /* checkpoint, seen */
+static const float BEACON_UNSEEN[3] = { 0.20f, 0.55f, 1.00f }; /* checkpoint, unseen */
 
 /* per material: specular, glossiness, emission, pattern (1 terrain, 2 panels) */
 static const float MATERIALS[][4] = {
@@ -162,7 +162,7 @@ static const char *SCENE_FS[] = {
     "uniform sampler2DShadow u_shadow;\n",
     "uniform mat4 u_shadow_mat;\n",
     "uniform vec2 u_shadow_bias;\n",   /* texel size, normal offset (m) */
-    "uniform vec3 u_eye_pos, u_eye_dir, u_eye_col, u_lamp_pos, u_lamp_col;\n",
+    "uniform vec3 u_eye_pos, u_eye_dir, u_eye_col, u_beacon_pos, u_beacon_col;\n",
     "uniform vec3 u_fill_dir, u_fill_col, u_lamps_col;\n",
     "uniform vec3 u_lamps_pos[9];\n",  /* N_LAMPS */
     "uniform vec4 u_mat;\n",           /* specular, gloss, emission, pattern */
@@ -241,9 +241,9 @@ static const char *SCENE_FS[] = {
     "    l *= inversesqrt(d2);\n",
     "    float cone = smoothstep(0.35, 0.85, dot(-l, u_eye_dir));\n",
     "    c += shade(a, spec, gloss, n, v, l, u_eye_col) * cone / (1.0 + 2.0 * d2);\n",
-    "    l = u_lamp_pos - v_pos;\n",       /* checkpoint lamp */
+    "    l = u_beacon_pos - v_pos;\n",     /* checkpoint beacon */
     "    d2 = dot(l, l);\n",
-    "    c += shade(a, spec, gloss, n, v, l * inversesqrt(d2), u_lamp_col) / (1.0 + 1.5 * d2);\n",
+    "    c += shade(a, spec, gloss, n, v, l * inversesqrt(d2), u_beacon_col) / (1.0 + 1.5 * d2);\n",
     "    float nv = 1.0 - max(dot(n, v), 0.0);\n",
     "    vec3 r = reflect(-v, n);\n",       /* sheen of the surroundings */
     "    c += spec * (0.04 + 0.5 * pow(nv, 5.0)) * mix(u_gnd_col, 3.0 * u_sky_col, 0.5 + 0.5 * r.z);\n",
@@ -367,7 +367,7 @@ static int build_programs(arc_renderer *r)
 #define LOC(field, name) u->field = p_glGetUniformLocation(p, name)
     LOC(cam, "u_cam"); LOC(fog, "u_fog"); LOC(time, "u_time"); LOC(focus, "u_focus");
     LOC(shadow_mat, "u_shadow_mat"); LOC(eye_pos, "u_eye_pos"); LOC(eye_dir, "u_eye_dir");
-    LOC(eye_col, "u_eye_col"); LOC(lamp_pos, "u_lamp_pos"); LOC(lamp_col, "u_lamp_col");
+    LOC(eye_col, "u_eye_col"); LOC(beacon_pos, "u_beacon_pos"); LOC(beacon_col, "u_beacon_col");
     LOC(mat, "u_mat"); LOC(aux, "u_aux");
 #undef LOC
     /* the look: constant */
@@ -476,199 +476,6 @@ static void mult_pose(vec3 x, quat q)
     glMultMatrixd(m);
 }
 
-/* ------------------------------------------------------------------------ */
-/* Meshes. Visuals are emitted in their body frame; the terrain in world
- * space. Face culling is off, so winding does not matter. */
-
-static void vertex(vec3 p, vec3 n)
-{
-    glNormal3d(n.x, n.y, n.z);
-    glVertex3d(p.x, p.y, p.z);
-}
-
-static void unit_sphere(void)
-{
-    int i, j, slices = 48, stacks = 32;
-    for (i = 0; i < stacks; ++i) {
-        double t0 = ARC_PI * i / stacks - 0.5 * ARC_PI;
-        double t1 = ARC_PI * (i + 1) / stacks - 0.5 * ARC_PI;
-        glBegin(GL_QUAD_STRIP);
-        for (j = 0; j <= slices; ++j) {
-            double p = 2.0 * ARC_PI * j / slices;
-            vec3 a = v3(cos(t1) * cos(p), cos(t1) * sin(p), sin(t1));
-            vec3 b = v3(cos(t0) * cos(p), cos(t0) * sin(p), sin(t0));
-            vertex(a, a);
-            vertex(b, b);
-        }
-        glEnd();
-    }
-}
-
-/* Rotation taking z onto the unit vector d, as a body-frame basis. */
-static void basis(vec3 d, vec3 *u, vec3 *v)
-{
-    *u = v3_normalize(fabs(d.z) < 0.9 ? v3_cross(v3(0, 0, 1), d) : v3_cross(v3(1, 0, 0), d));
-    *v = v3_cross(d, *u);
-}
-
-/* Frame along p0 -> p1 that keeps the body axes when the segment runs
- * along body z (the legs), so cross sections line up with body x / y. */
-static void segment_frame(vec3 p0, vec3 p1, vec3 *d, vec3 *u, vec3 *v, double *len)
-{
-    vec3 s = v3_sub(p1, p0);
-    *len = v3_len(s);
-    *d = v3_scale(s, 1.0 / (*len > 1e-12 ? *len : 1.0));
-    if (fabs(d->x) < 1e-9 && fabs(d->y) < 1e-9) {
-        *u = v3(1, 0, 0);
-        *v = v3(0, d->z > 0 ? 1 : -1, 0);
-    } else {
-        basis(*d, u, v);
-    }
-}
-
-static vec3 frame_point(vec3 o, vec3 u, vec3 v, vec3 d, double x, double y, double z)
-{
-    return v3_add(o, v3_add(v3_scale(u, x), v3_add(v3_scale(v, y), v3_scale(d, z))));
-}
-
-/* Disc cap of a cylinder at distance z along d, facing nd. */
-static void cap(vec3 o, vec3 u, vec3 v, vec3 d, double z, double rad, double nd, int slices)
-{
-    int j;
-    glBegin(GL_TRIANGLE_FAN);
-    vertex(v3_madd(o, d, z), v3_scale(d, nd));
-    for (j = 0; j <= slices; ++j) {
-        double p = 2.0 * ARC_PI * j / slices;
-        vertex(frame_point(o, u, v, d, rad * cos(p), rad * sin(p), z), v3_scale(d, nd));
-    }
-    glEnd();
-}
-
-/* Closed cylinder; ribbed ones get a corrugated surface. */
-static void mesh_cylinder(vec3 p0, vec3 p1, double rad, int ribbed)
-{
-    vec3 d, u, v;
-    double len, pitch = 0.010, depth = ribbed ? 0.12 * rad : 0.0;
-    int i, j, slices = ribbed ? 16 : 36, rings;
-    segment_frame(p0, p1, &d, &u, &v, &len);
-    if (len < 1e-9)
-        return;
-    rings = ribbed ? (int)ceil(len / pitch) * 4 : 1;
-    for (i = 0; i < rings; ++i) {
-        double z0 = len * i / rings, z1 = len * (i + 1) / rings;
-        double k = 2.0 * ARC_PI / pitch;
-        double r0 = rad - depth * (0.5 - 0.5 * cos(k * z0)), r1 = rad - depth * (0.5 - 0.5 * cos(k * z1));
-        double s0 = depth * 0.5 * k * sin(k * z0), s1 = depth * 0.5 * k * sin(k * z1); /* -dr/dz */
-        glBegin(GL_QUAD_STRIP);
-        for (j = 0; j <= slices; ++j) {
-            double p = 2.0 * ARC_PI * j / slices, c = cos(p), s = sin(p);
-            vec3 radial = v3_add(v3_scale(u, c), v3_scale(v, s));
-            vertex(frame_point(p0, u, v, d, r1 * c, r1 * s, z1), v3_normalize(v3_madd(radial, d, s1)));
-            vertex(frame_point(p0, u, v, d, r0 * c, r0 * s, z0), v3_normalize(v3_madd(radial, d, s0)));
-        }
-        glEnd();
-    }
-    cap(p0, u, v, d, 0.0, rad, -1.0, slices);
-    cap(p0, u, v, d, len, rad, 1.0, slices);
-}
-
-/* Faceted prism: a rectangle of half extents (w, aspect w) with chamfered
- * corners, w going from r0 at p0 to r1 at p1. */
-static void mesh_taper(vec3 p0, vec3 p1, double r0, double r1, double aspect)
-{
-    static const double PX[8] = { 1, 0.6, -0.6, -1, -1, -0.6, 0.6, 1 };
-    static const double PY[8] = { 0.45, 1, 1, 0.45, -0.45, -1, -1, -0.45 };
-    vec3 d, u, v, a[8], b[8];
-    double len;
-    int k;
-    segment_frame(p0, p1, &d, &u, &v, &len);
-    if (len < 1e-9)
-        return;
-    for (k = 0; k < 8; ++k) {
-        a[k] = frame_point(p0, u, v, d, PX[k] * r0, PY[k] * r0 * aspect, 0.0);
-        b[k] = frame_point(p0, u, v, d, PX[k] * r1, PY[k] * r1 * aspect, len);
-    }
-    glBegin(GL_QUADS);
-    for (k = 0; k < 8; ++k) {
-        int m = (k + 1) % 8;
-        vec3 n = v3_normalize(v3_cross(v3_sub(a[m], a[k]), v3_sub(b[k], a[k])));
-        /* point the normal away from the axis */
-        if (v3_dot(n, v3_sub(a[k], p0)) < 0.0)
-            n = v3_neg(n);
-        vertex(a[k], n); vertex(a[m], n); vertex(b[m], n); vertex(b[k], n);
-    }
-    glEnd();
-    glBegin(GL_POLYGON);
-    for (k = 0; k < 8; ++k)
-        vertex(a[k], v3_neg(d));
-    glEnd();
-    glBegin(GL_POLYGON);
-    for (k = 0; k < 8; ++k)
-        vertex(b[k], d);
-    glEnd();
-}
-
-/* Box with rounded edges: each face is a grid whose vertices are pushed
- * onto the rounded surface (inner box + bevel along the normal). */
-static void mesh_box(vec3 c, vec3 e)
-{
-    double ext[3], bevel = 0.22 * arc_min(e.x, arc_min(e.y, e.z)), s[3][6];
-    int face, ax, i, j, k;
-    ext[0] = e.x; ext[1] = e.y; ext[2] = e.z;
-    for (k = 0; k < 3; ++k) {
-        s[k][0] = -ext[k]; s[k][1] = -ext[k] + 0.3 * bevel; s[k][2] = -ext[k] + bevel;
-        s[k][3] = ext[k] - bevel; s[k][4] = ext[k] - 0.3 * bevel; s[k][5] = ext[k];
-    }
-    for (face = 0; face < 6; ++face) {
-        int a = face / 2, b = (a + 1) % 3, cc = (a + 2) % 3;
-        double sign = face % 2 ? -1.0 : 1.0;
-        glBegin(GL_QUADS);
-        for (i = 0; i < 5; ++i) {
-            for (j = 0; j < 5; ++j) {
-                int corner;
-                for (corner = 0; corner < 4; ++corner) {
-                    int ii = i + (corner == 1 || corner == 2), jj = j + (corner >= 2);
-                    double p[3], in[3], n[3];
-                    vec3 nn;
-                    p[a] = sign * ext[a];
-                    p[b] = s[b][ii];
-                    p[cc] = s[cc][jj];
-                    for (ax = 0; ax < 3; ++ax) {
-                        double lim = ext[ax] - bevel;
-                        in[ax] = arc_clamp(p[ax], -lim, lim);
-                        n[ax] = p[ax] - in[ax];
-                    }
-                    nn = v3_normalize(v3(n[0], n[1], n[2]));
-                    vertex(v3(c.x + in[0] + bevel * nn.x, c.y + in[1] + bevel * nn.y,
-                              c.z + in[2] + bevel * nn.z), nn);
-                }
-            }
-        }
-        glEnd();
-    }
-}
-
-static void mesh_ring(vec3 c, vec3 axis, double major, double tube)
-{
-    vec3 d = v3_normalize(axis), u, v;
-    int i, j, nu = 48, nv = 14;
-    basis(d, &u, &v);
-    for (i = 0; i < nu; ++i) {
-        double t0 = 2.0 * ARC_PI * i / nu, t1 = 2.0 * ARC_PI * (i + 1) / nu;
-        glBegin(GL_QUAD_STRIP);
-        for (j = 0; j <= nv; ++j) {
-            double p = 2.0 * ARC_PI * j / nv, cp = cos(p), sp = sin(p);
-            vec3 e1 = v3_add(v3_scale(u, cos(t1)), v3_scale(v, sin(t1)));
-            vec3 e0 = v3_add(v3_scale(u, cos(t0)), v3_scale(v, sin(t0)));
-            vec3 n1 = v3_add(v3_scale(e1, cp), v3_scale(d, sp));
-            vec3 n0 = v3_add(v3_scale(e0, cp), v3_scale(d, sp));
-            vertex(v3_add(c, v3_add(v3_scale(e1, major), v3_scale(n1, tube))), n1);
-            vertex(v3_add(c, v3_add(v3_scale(e0, major), v3_scale(n0, tube))), n0);
-        }
-        glEnd();
-    }
-}
-
 static void build_visual(const arc_renderer *r, const arc_visual *v)
 {
     switch (v->type) {
@@ -680,16 +487,16 @@ static void build_visual(const arc_renderer *r, const arc_visual *v)
         glPopMatrix();
         break;
     case ARC_VIS_BOX:
-        mesh_box(v->p0, v->p1);
+        arc_mesh_box(v->p0, v->p1);
         break;
     case ARC_VIS_TAPER:
-        mesh_taper(v->p0, v->p1, v->radius, v->radius2, v->aspect);
+        arc_mesh_taper(v->p0, v->p1, v->radius, v->radius2, v->aspect);
         break;
     case ARC_VIS_CYLINDER:
-        mesh_cylinder(v->p0, v->p1, v->radius, v->material == ARC_MAT_RIBS);
+        arc_mesh_cylinder(v->p0, v->p1, v->radius, v->material == ARC_MAT_RIBS);
         break;
     case ARC_VIS_RING:
-        mesh_ring(v->p0, v->p1, v->radius, v->radius2);
+        arc_mesh_ring(v->p0, v->p1, v->radius, v->radius2);
         break;
     }
 }
@@ -712,52 +519,18 @@ static void update_visuals(arc_renderer *r, const arc_world *w)
 /* ------------------------------------------------------------------------ */
 /* Terrain */
 
-static double cell_hash(int ix, int iy)
-{
-    unsigned long h = (unsigned long)(ix * 73856093L) ^ (unsigned long)(iy * 19349663L);
-    h = (h ^ (h >> 13)) * 1274126177UL;
-    return ((h >> 8) & 0xffff) / 65535.0;
-}
-
-static double occlusion(const arc_terrain *t, int ix, int iy, double h)
-{
-    return arc_clamp((arc_terrain_cell(t, ix, iy) - h) / 0.12, 0.0, 1.0);
-}
-
-/* Ambient occlusion at the corner (sx, sy) of a column top, from the
- * neighbours rising above it. */
-static double corner_ao(const arc_terrain *t, int ix, int iy, int sx, int sy, double h)
-{
-    double occ = occlusion(t, ix + sx, iy, h) + occlusion(t, ix, iy + sy, h)
-                 + 0.5 * occlusion(t, ix + sx, iy + sy, h);
-    return 1.0 - 0.22 * occ;
-}
-
-static void terrain_side(double x0, double y0, double x1, double y1, double zlo, double zhi,
-                         double nx, double ny, double c)
-{
-    glNormal3d(nx, ny, 0.0);
-    glColor3d(0.45 * c, 0.45 * c, 0.47 * c); /* dark crevice at the foot */
-    glVertex3d(x0, y0, zlo);
-    glVertex3d(x1, y1, zlo);
-    glColor3d(c, c, 1.04 * c);
-    glVertex3d(x1, y1, zhi);
-    glVertex3d(x0, y0, zhi);
-}
-
 /* Recompiles the terrain list, and sets the scene shader's uniforms that
  * depend on the terrain, when the terrain changes. */
 static void update_terrain(arc_renderer *r, const arc_terrain *t)
 {
-    int ix, iy, k;
-    double lo = 1e30, bottom;
+    int k;
+    double lo = 1e30;
     float lamps[3 * N_LAMPS];
     if (!memcmp(&r->terrain_cache, t, sizeof(*t)))
         return;
     r->terrain_cache = *t;
     for (k = 0; k < t->nx * t->ny; ++k)
         lo = arc_min(lo, t->h[k]);
-    bottom = lo - VOID_DEPTH;
     for (k = 0; k < N_LAMPS; ++k) {
         double x = t->ox + t->nx * t->cell * (k % LAMP_GRID + 0.5) / LAMP_GRID;
         double y = t->oy + t->ny * t->cell * (k / LAMP_GRID + 0.5) / LAMP_GRID, top = lo, dx, dy;
@@ -774,38 +547,7 @@ static void update_terrain(arc_renderer *r, const arc_terrain *t)
     p_glUseProgram(0);
 
     glNewList(r->list_terrain, GL_COMPILE);
-    glBegin(GL_QUADS);
-    for (iy = 0; iy < t->ny; ++iy) {
-        for (ix = 0; ix < t->nx; ++ix) {
-            double h = arc_terrain_cell(t, ix, iy), n;
-            double x0 = t->ox + ix * t->cell, x1 = x0 + t->cell;
-            double y0 = t->oy + iy * t->cell, y1 = y0 + t->cell;
-            double c = 0.36 + 0.05 * cell_hash(ix, iy) + 0.09 * arc_clamp(h, -0.3, 0.4), ao;
-            glNormal3d(0, 0, 1);
-            ao = corner_ao(t, ix, iy, -1, -1, h);
-            glColor3d(c * ao, c * ao, 1.04 * c * ao);
-            glVertex3d(x0, y0, h);
-            ao = corner_ao(t, ix, iy, 1, -1, h);
-            glColor3d(c * ao, c * ao, 1.04 * c * ao);
-            glVertex3d(x1, y0, h);
-            ao = corner_ao(t, ix, iy, 1, 1, h);
-            glColor3d(c * ao, c * ao, 1.04 * c * ao);
-            glVertex3d(x1, y1, h);
-            ao = corner_ao(t, ix, iy, -1, 1, h);
-            glColor3d(c * ao, c * ao, 1.04 * c * ao);
-            glVertex3d(x0, y1, h);
-            c *= 0.8;
-            if ((n = arc_terrain_cell(t, ix + 1, iy)) < h)
-                terrain_side(x1, y0, x1, y1, arc_max(n, bottom), h, 1.0, 0.0, c);
-            if ((n = arc_terrain_cell(t, ix - 1, iy)) < h)
-                terrain_side(x0, y1, x0, y0, arc_max(n, bottom), h, -1.0, 0.0, c);
-            if ((n = arc_terrain_cell(t, ix, iy + 1)) < h)
-                terrain_side(x1, y1, x0, y1, arc_max(n, bottom), h, 0.0, 1.0, c);
-            if ((n = arc_terrain_cell(t, ix, iy - 1)) < h)
-                terrain_side(x0, y0, x1, y0, arc_max(n, bottom), h, 0.0, -1.0, c);
-        }
-    }
-    glEnd();
+    arc_mesh_terrain(t, lo - VOID_DEPTH);
     glEndList();
 }
 
@@ -846,6 +588,12 @@ static void draw_robot(const arc_renderer *r, const arc_world *w, int lit)
     }
 }
 
+/* Color of checkpoint i: lit while the robot sees it. */
+static const float *beacon_color(int i, int active)
+{
+    return i == active ? BEACON_SEEN : BEACON_UNSEEN;
+}
+
 /* Checkpoint beacon of marker m, bobbing above the ground. */
 static vec3 beacon(const double *m, double time)
 {
@@ -858,7 +606,7 @@ static void draw_markers(arc_renderer *r, const double *m, int n, int active, do
     int i;
     for (i = 0; i < n; ++i, m += 4) {
         vec3 p = beacon(m, time);
-        const float *c = i == active ? LAMP_ACTIVE : LAMP_IDLE;
+        const float *c = beacon_color(i, active);
         float col[3];
         col[0] = (float)sqrt(c[0]); col[1] = (float)sqrt(c[1]); col[2] = (float)sqrt(c[2]);
         set_material(r, ARC_MAT_GLOW, col, 0.0);
@@ -869,7 +617,7 @@ static void draw_markers(arc_renderer *r, const double *m, int n, int active, do
         glPopMatrix();
         if (m[3] != r->ring_radius) {
             glNewList(r->list_ring, GL_COMPILE);
-            mesh_ring(v3(0, 0, 0), v3(0, 0, 1), m[3], 0.012);
+            arc_mesh_ring(v3(0, 0, 0), v3(0, 0, 1), m[3], 0.012);
             glEndList();
             r->ring_radius = m[3];
         }
@@ -920,7 +668,7 @@ static void draw_glow(const arc_renderer *r, const arc_world *w, vec3 eye, mat4 
         billboard(v3_madd(c, toward, 0.6 * s), right, up, s);
     }
     for (i = 0; i < n; ++i) {
-        const float *c = i == active ? LAMP_ACTIVE : LAMP_IDLE;
+        const float *c = beacon_color(i, active);
         vec3 p = beacon(m + 4 * i, time);
         glColor4f(c[0], c[1], c[2], 0.8f);
         billboard(v3_madd(p, v3_normalize(v3_sub(eye, p)), 0.3), right, up, 0.45);
@@ -930,7 +678,7 @@ static void draw_glow(const arc_renderer *r, const arc_world *w, vec3 eye, mat4 
     p_glUniform1f(r->glow_beam, 1.0f);
     glBegin(GL_QUADS);
     for (i = 0; i < n; ++i) {
-        const float *c = i == active ? LAMP_ACTIVE : LAMP_IDLE;
+        const float *c = beacon_color(i, active);
         vec3 base = v3(m[4 * i], m[4 * i + 1], m[4 * i + 2]);
         vec3 side = v3_normalize(v3_cross(v3(0, 0, 1), v3_sub(eye, base)));
         double s = 0.1, top = 3.5;
@@ -1150,7 +898,7 @@ arc_renderer *arc_render_create(int width, int height, int visible)
     r->list_ring = r->list_sphere + 2;
     r->list_visuals = glGenLists(ARC_MAX_VISUALS);
     glNewList(r->list_sphere, GL_COMPILE);
-    unit_sphere();
+    arc_mesh_sphere();
     glEndList();
     return r;
 }
@@ -1240,8 +988,8 @@ static void set_scene_uniforms(const arc_renderer *r, const arc_world *w, vec3 e
                                const double *markers, int n_markers, int active)
 {
     const scene_uniforms *u = &r->su;
-    vec3 eye_pos = v3(0, 0, -100), eye_dir = v3(1, 0, 0), lamp = v3(0, 0, -100);
-    float eye_col[3] = { 0, 0, 0 }, lamp_col[3] = { 0, 0, 0 }, m[16];
+    vec3 eye_pos = v3(0, 0, -100), eye_dir = v3(1, 0, 0), beacon = v3(0, 0, -100);
+    float eye_col[3] = { 0, 0, 0 }, beacon_col[3] = { 0, 0, 0 }, m[16];
     mat4 bias;
     int i;
 
@@ -1260,11 +1008,11 @@ static void set_scene_uniforms(const arc_renderer *r, const arc_world *w, vec3 e
             break;
         }
     }
-    if (markers && n_markers > 0) {
-        const float *c = active == 0 ? LAMP_ACTIVE : LAMP_IDLE;
-        lamp = v3(markers[0], markers[1], markers[2] + BEACON_HEIGHT);
+    if (n_markers > 0) {
+        const float *c = beacon_color(0, active);
+        beacon = v3(markers[0], markers[1], markers[2] + BEACON_HEIGHT);
         for (i = 0; i < 3; ++i)
-            lamp_col[i] = (active == 0 ? 1.6f : 0.8f) * c[i];
+            beacon_col[i] = (active == 0 ? 1.6f : 0.8f) * c[i];
     }
 
     memset(&bias, 0, sizeof(bias));
@@ -1282,8 +1030,8 @@ static void set_scene_uniforms(const arc_renderer *r, const arc_world *w, vec3 e
     p_glUniform3f(u->eye_pos, (float)eye_pos.x, (float)eye_pos.y, (float)eye_pos.z);
     p_glUniform3f(u->eye_dir, (float)eye_dir.x, (float)eye_dir.y, (float)eye_dir.z);
     p_glUniform3fv(u->eye_col, 1, eye_col);
-    p_glUniform3f(u->lamp_pos, (float)lamp.x, (float)lamp.y, (float)lamp.z);
-    p_glUniform3fv(u->lamp_col, 1, lamp_col);
+    p_glUniform3f(u->beacon_pos, (float)beacon.x, (float)beacon.y, (float)beacon.z);
+    p_glUniform3fv(u->beacon_col, 1, beacon_col);
 }
 
 int arc_render_frame(arc_renderer *r, const arc_sim *s, int world,
@@ -1296,6 +1044,8 @@ int arc_render_frame(arc_renderer *r, const arc_sim *s, int world,
     mat4 view, proj, shadow;
     vec3 eye;
 
+    if (!markers)
+        n_markers = 0;
     handle_events(r);
     if (r->closed)
         return 0;
@@ -1345,11 +1095,10 @@ int arc_render_frame(arc_renderer *r, const arc_sim *s, int world,
     p_glUniform4f(r->su.aux, (float)t->ox, (float)t->oy, (float)t->cell, 0.0f);
     glCallList(r->list_terrain);
     draw_robot(r, w, 1);
-    if (markers && n_markers > 0)
-        draw_markers(r, markers, n_markers, active, w->time);
+    draw_markers(r, markers, n_markers, active, w->time);
 
     /* glow */
-    draw_glow(r, w, eye, view, markers, markers ? n_markers : 0, active, w->time);
+    draw_glow(r, w, eye, view, markers, n_markers, active, w->time);
 
     /* vignette */
     glDisable(GL_DEPTH_TEST);

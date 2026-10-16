@@ -1,7 +1,7 @@
 """Evaluate a policy per terrain difficulty: checkpoints per minute, time
 stalled near a checkpoint, falls and their causes.
 
-    uv run python scripts/evaluate.py runs/terrain --difficulties 0 0.3 0.6 1.0
+    uv run python scripts/evaluate.py runs/leaper --difficulties 0 0.3 0.6 1.0
 """
 
 from __future__ import annotations

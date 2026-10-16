@@ -7,6 +7,7 @@ the boundary are contiguous float64 / int32 / uint32 numpy arrays.
 from __future__ import annotations
 
 import ctypes
+import functools
 from pathlib import Path
 
 import numpy as np
@@ -34,48 +35,39 @@ def _declare(lib: ctypes.CDLL, name: str, restype, *argtypes) -> None:
     fn.argtypes = list(argtypes)
 
 
-_sim_lib: ctypes.CDLL | None = None
-_render_lib: ctypes.CDLL | None = None
-
-
+@functools.cache
 def sim_lib() -> ctypes.CDLL:
-    global _sim_lib
-    if _sim_lib is None:
-        lib = _load("libarcsim.so")
-        _declare(lib, "arc_sim_create", _vp, ctypes.c_int, ctypes.c_double, ctypes.c_int,
-                 ctypes.c_int, ctypes.c_double)
-        _declare(lib, "arc_sim_destroy", None, _vp)
-        _declare(lib, "arc_sim_set_threads", None, _vp, ctypes.c_int)
-        _declare(lib, "arc_sim_num_joints", ctypes.c_int)
-        _declare(lib, "arc_sim_num_legs", ctypes.c_int)
-        _declare(lib, "arc_sim_robot_info", None, _vp, _f64, _f64, _f64, _f64)
-        _declare(lib, "arc_sim_reset", None, _vp, _i32, ctypes.c_int, _u32, _f64)
-        # called every step: raw addresses, validated by the Sim methods, since
-        # ndpointer argument checks cost a few microseconds per array
-        _declare(lib, "arc_sim_step", None, _vp, _vp)
-        _declare(lib, "arc_sim_observe", None, _vp, _vp, _vp, _vp, _vp, _vp)
-        _declare(lib, "arc_sim_heights", None, _vp, _vp, ctypes.c_int, _vp)
-        _declare(lib, "arc_sim_terrain_at", None, _vp, _i32, _f64, ctypes.c_int, _f64)
-        _sim_lib = lib
-    return _sim_lib
+    lib = _load("libarcsim.so")
+    _declare(lib, "arc_sim_create", _vp, ctypes.c_int, ctypes.c_double, ctypes.c_int,
+             ctypes.c_int, ctypes.c_double)
+    _declare(lib, "arc_sim_destroy", None, _vp)
+    _declare(lib, "arc_sim_set_threads", None, _vp, ctypes.c_int)
+    _declare(lib, "arc_sim_num_joints", ctypes.c_int)
+    _declare(lib, "arc_sim_num_legs", ctypes.c_int)
+    _declare(lib, "arc_sim_robot_info", None, _vp, _f64, _f64, _f64, _f64)
+    _declare(lib, "arc_sim_reset", None, _vp, _i32, ctypes.c_int, _u32, _f64)
+    # called every step: raw addresses, validated by the Sim methods, since
+    # ndpointer argument checks cost a few microseconds per array
+    _declare(lib, "arc_sim_step", None, _vp, _vp)
+    _declare(lib, "arc_sim_observe", None, _vp, _vp, _vp, _vp, _vp, _vp)
+    _declare(lib, "arc_sim_heights", None, _vp, _vp, ctypes.c_int, _vp)
+    _declare(lib, "arc_sim_terrain_at", None, _vp, _i32, _f64, ctypes.c_int, _f64)
+    return lib
 
 
+@functools.cache
 def render_lib() -> ctypes.CDLL:
-    global _render_lib
-    if _render_lib is None:
-        sim_lib()
-        lib = _load("libarcrender.so")
-        _declare(lib, "arc_render_create", _vp, ctypes.c_int, ctypes.c_int, ctypes.c_int)
-        _declare(lib, "arc_render_destroy", None, _vp)
-        _declare(lib, "arc_render_frame", ctypes.c_int, _vp, _vp, ctypes.c_int, _vp,
-                 ctypes.c_int, ctypes.c_int, _vp)
-        _declare(lib, "arc_render_size", None, _vp, ctypes.POINTER(ctypes.c_int),
-                 ctypes.POINTER(ctypes.c_int))
-        _declare(lib, "arc_render_keys", ctypes.c_int, _vp, _i32, ctypes.c_int)
-        _declare(lib, "arc_render_set_title", None, _vp, ctypes.c_char_p)
-        _declare(lib, "arc_render_set_view", None, _vp, ctypes.c_int)
-        _render_lib = lib
-    return _render_lib
+    lib = _load("libarcrender.so")
+    _declare(lib, "arc_render_create", _vp, ctypes.c_int, ctypes.c_int, ctypes.c_int)
+    _declare(lib, "arc_render_destroy", None, _vp)
+    _declare(lib, "arc_render_frame", ctypes.c_int, _vp, _vp, ctypes.c_int, _vp,
+             ctypes.c_int, ctypes.c_int, _vp)
+    _declare(lib, "arc_render_size", None, _vp, ctypes.POINTER(ctypes.c_int),
+             ctypes.POINTER(ctypes.c_int))
+    _declare(lib, "arc_render_keys", ctypes.c_int, _vp, _i32, ctypes.c_int)
+    _declare(lib, "arc_render_set_title", None, _vp, ctypes.c_char_p)
+    _declare(lib, "arc_render_set_view", None, _vp, ctypes.c_int)
+    return lib
 
 
 class Sim:
@@ -85,7 +77,6 @@ class Sim:
                  grid: int = 64, cell: float = 0.4, threads: int = 1):
         self._lib = sim_lib()
         self.num_worlds = num_worlds
-        self.dt = dt
         self.grid = grid
         self.cell = cell
         self.num_joints = self._lib.arc_sim_num_joints()
@@ -93,7 +84,7 @@ class Sim:
         self._ptr = self._lib.arc_sim_create(num_worlds, dt, substeps, grid, cell)
         if not self._ptr:
             raise MemoryError("arc_sim_create failed")
-        self.set_threads(threads)
+        self._lib.arc_sim_set_threads(self._ptr, int(threads))
 
         nj = self.num_joints
         self.default_angles = np.zeros(nj)
@@ -118,9 +109,6 @@ class Sim:
     @property
     def half_extent(self) -> float:
         return 0.5 * self.grid * self.cell
-
-    def set_threads(self, threads: int) -> None:
-        self._lib.arc_sim_set_threads(self._ptr, int(threads))
 
     def reset(self, ids: np.ndarray, seeds: np.ndarray, difficulty: np.ndarray) -> None:
         ids = np.ascontiguousarray(ids, dtype=np.int32)

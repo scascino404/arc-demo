@@ -20,6 +20,7 @@ from stable_baselines3.common.vec_env import VecMonitor, VecNormalize
 
 from arc import ArcVecEnv, TaskConfig
 from arc.runs import default_threads, load_model, load_normalize, save_run
+from arc.task import CAUSES
 
 
 def lr_schedule(lr: float, steps: float, done: int, decay: float):
@@ -68,7 +69,7 @@ class TaskStats(BaseCallback):
         if self.checkpoints:
             self.logger.record("task/checkpoints_per_episode", float(np.mean(self.checkpoints)))
             self.logger.record("task/fall_rate", float(np.mean(self.falls)))
-            for cause in ("flip", "beached", "unstable", "void"):
+            for cause in CAUSES[1:]:
                 self.logger.record(f"task/fall_{cause}", float(np.mean([c == cause for c in self.causes])))
         self.logger.record("task/difficulty_mean", float(task.level.mean()))
         self.logger.record("task/difficulty_max", float(task.level.max()))

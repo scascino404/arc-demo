@@ -1,8 +1,8 @@
 """Watch a trained policy in the viewer, or record it to a GIF.
 
-    uv run python scripts/enjoy.py runs/terrain
-    uv run python scripts/enjoy.py runs/terrain --difficulty 0.6
-    uv run python scripts/enjoy.py runs/terrain --record out/terrain.gif --seconds 20
+    uv run python scripts/enjoy.py models/leaper
+    uv run python scripts/enjoy.py runs/leaper --difficulty 0.6
+    uv run python scripts/enjoy.py models/leaper --record out/leaper.gif --seconds 20
 
 Keys: R new terrain, 0-9 terrain difficulty, Space pause, C camera view,
 Esc/Q quit.

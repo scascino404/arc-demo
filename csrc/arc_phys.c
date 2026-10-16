@@ -103,11 +103,10 @@ int arc_add_sphere(arc_world *w, int body, vec3 local_pos, double radius)
     if (w->n_spheres >= ARC_MAX_SPHERES)
         return -1;
     s = &w->spheres[w->n_spheres];
+    memset(s, 0, sizeof(*s));
     s->body = body;
     s->pos = local_pos;
     s->radius = radius;
-    s->touch = 0;
-    s->anchored = 0;
     return w->n_spheres++;
 }
 
@@ -495,7 +494,6 @@ HOT double solve_contact(arc_world *w, int bi, vec3 point, vec3 n, double depth,
         c->body = bi;
         c->local = m3_tmul_v3(&b->rot, r);
         c->n = n;
-        c->lambda_n = ln;
     }
     return ln;
 }
