@@ -43,6 +43,23 @@ R new terrain, 0-9 terrain difficulty, C camera (behind / side / front),
 Esc/Q quit. Left drag orbits the
 camera, the wheel zooms.
 
+## Results
+
+`runs/leaper1`: PPO from scratch with the terrain curriculum, stopped at 26M
+steps (about 30 minutes on 8 threads of a Ryzen 7 8840U). Evaluated with
+`scripts/evaluate.py` (64 episodes of 33 s per difficulty, deterministic):
+
+| difficulty | checkpoints/min | stalled | falls |
+|-----------:|----------------:|--------:|------:|
+| 0.00       | 23.0            | 0%      | 0%    |
+| 0.25       | 23.6            | 0%      | 0%    |
+| 0.50       | 23.7            | 0%      | 0%    |
+| 0.75       | 23.8            | 0%      | 3%    |
+| 1.00       | 23.5            | 0%      | 3%    |
+
+The robot walks 91-93% of the distance with the checkpoint in its field of
+view and brings a new checkpoint into view in 0.33 s (median).
+
 ## Design
 
 ### Physics (`csrc/arc_phys.c`)
