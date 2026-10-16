@@ -47,18 +47,17 @@ Drag with the left mouse button to orbit the camera; scroll to zoom.
 
 ## Retrain the agent
 
-The included agent was trained with these two commands, in about 50 minutes
-on an 8-core laptop:
+The included agent was trained with this command, in about 25 minutes on an
+8-core laptop:
 
 ```sh
-uv run python scripts/train.py --name leaper --steps 60e6
-uv run python scripts/train.py --name leaper --steps 15e6 --lr 3e-4 --resume runs/leaper
+uv run python scripts/train.py --name leaper
 ```
 
-The first trains from scratch, starting on flat ground and making the
-terrain harder as the robot improves. The second fine-tunes the result,
-which makes the robot fall much less often. Checkpoints are saved in
-`runs/leaper/` every 2M steps; follow training with
+Training starts on flat ground and makes the terrain harder as the robot
+improves. Over the last 10M of its 40M steps, the learning rate decays to 0,
+which settles the policy and makes the robot fall much less often.
+Checkpoints are saved in `runs/leaper/` every 2M steps; follow training with
 `uv run tensorboard --logdir runs`.
 
 To watch your agent, pass its run directory to `enjoy.py`, which plays the
@@ -70,9 +69,9 @@ uv run python scripts/enjoy.py runs/leaper
 
 To measure it, run `uv run python scripts/evaluate.py runs/leaper`: it prints
 the checkpoints reached per minute and how often the robot falls, per
-terrain difficulty. The included agent reaches about 24 checkpoints per
-minute at every difficulty, and falls in under 0.5% of episodes up to
-difficulty 0.75 and in 2% at difficulty 1.
+terrain difficulty. The included agent reaches about 23 checkpoints per
+minute at every difficulty, and falls in under 2% of episodes even at
+difficulty 1.
 
 ## Project files
 

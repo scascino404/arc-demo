@@ -1,7 +1,7 @@
 """Train a PPO policy for the checkpoint task.
 
-    uv run python scripts/train.py --name terrain --steps 40e6
-    uv run python scripts/train.py --name terrain --steps 10e6 --resume runs/terrain
+    uv run python scripts/train.py --name leaper
+    uv run python scripts/train.py --name leaper --steps 10e6 --resume runs/leaper
 
 Outputs go to runs/<name>/: final model.zip + vecnormalize.pkl, periodic
 checkpoints, and TensorBoard logs (uv run tensorboard --logdir runs).
@@ -20,6 +20,18 @@ from stable_baselines3.common.vec_env import VecMonitor, VecNormalize
 
 from arc import ArcVecEnv, TaskConfig
 from arc.runs import default_threads, load_model, load_normalize, save_run
+
+
+def lr_schedule(lr: float, steps: float, done: int, decay: float):
+    """Constant lr, then a linear decay to 0 over the last `decay` fraction of
+    this run's steps, which settles the policy. SB3 passes the fraction of
+    all steps left, counting the done ones of a resumed run."""
+    total = done + steps
+
+    def schedule(remaining: float) -> float:
+        return lr * min(1.0, remaining * total / max(decay * steps, 1.0))
+
+    return schedule
 
 
 class TaskStats(BaseCallback):
@@ -68,13 +80,14 @@ class TaskStats(BaseCallback):
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--name", default="run")
-    p.add_argument("--steps", type=float, default=20e6)
+    p.add_argument("--steps", type=float, default=40e6)
     p.add_argument("--envs", type=int, default=64)
     p.add_argument("--threads", type=int, default=default_threads(),
                    help="threads for both the simulation and torch (default: half the cores)")
     p.add_argument("--n-steps", type=int, default=256, help="rollout length per env")
-    p.add_argument("--lr", type=float, default=6e-4,
-                   help="learning rate; with --resume, it decays linearly to 0 over the run")
+    p.add_argument("--lr", type=float, default=6e-4)
+    p.add_argument("--decay", type=float, default=0.25,
+                   help="fraction of the run, at its end, over which the learning rate decays to 0")
     p.add_argument("--epochs", type=int, default=5, help="PPO epochs per rollout")
     p.add_argument("--minibatches", type=int, default=8, help="minibatches per epoch")
     p.add_argument("--gamma", type=float, default=0.99)
@@ -103,17 +116,13 @@ def main():
     if args.resume:
         env = load_normalize(args.resume, env, training=True)
         model = load_model(args.resume, env, tensorboard_log=str(out / "tb"))
-        # fine-tuning: a decaying learning rate lets the policy settle
-        # (SB3's progress fraction spans all steps, including the ones
-        # already trained; rescale it so the decay spans only this run's)
-        total = model.num_timesteps + args.steps
-        model.learning_rate = lambda remaining: args.lr * min(1.0, remaining * total / args.steps)
+        model.learning_rate = lr_schedule(args.lr, args.steps, model.num_timesteps, args.decay)
         model._setup_lr_schedule()
     else:
         env = VecNormalize(env, norm_obs=True, norm_reward=True, clip_obs=10.0, gamma=args.gamma)
         model = PPO(
             "MlpPolicy", env,
-            learning_rate=args.lr,
+            learning_rate=lr_schedule(args.lr, args.steps, 0, args.decay),
             n_steps=args.n_steps,
             batch_size=args.envs * args.n_steps // args.minibatches,
             n_epochs=args.epochs,
