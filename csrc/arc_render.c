@@ -3,7 +3,7 @@
  *
  * Scene: sky gradient, linear fog, one directional light, block terrain
  * compiled into a display list (rebuilt when the terrain changes), robot
- * visuals (boxes, capsules, spheres), blob shadows on the column tops under
+ * visuals (spheres, boxes, cylinders, tapers, rings), blob shadows on the column tops under
  * every visual, and checkpoint pillars. Offscreen rendering draws into a
  * framebuffer object of a hidden window.
  */
@@ -107,7 +107,6 @@ static void build_meshes(arc_renderer *r)
     glVertex3d(-1, -1, -1); glVertex3d(-1, 1, -1); glVertex3d(1, 1, -1); glVertex3d(1, -1, -1);
     glEnd();
     glEndList();
-
 }
 
 /* ------------------------------------------------------------------------ */
@@ -208,11 +207,17 @@ static double terrain_key(const arc_terrain *t)
 static void mult_pose(vec3 x, quat q)
 {
     GLdouble m[16];
-    double w = q.w, a = q.x, b = q.y, c = q.z;
-    m[0] = 1 - 2 * (b * b + c * c); m[4] = 2 * (a * b - w * c);     m[8] = 2 * (a * c + w * b);      m[12] = x.x;
-    m[1] = 2 * (a * b + w * c);     m[5] = 1 - 2 * (a * a + c * c); m[9] = 2 * (b * c - w * a);      m[13] = x.y;
-    m[2] = 2 * (a * c - w * b);     m[6] = 2 * (b * c + w * a);     m[10] = 1 - 2 * (a * a + b * b); m[14] = x.z;
-    m[3] = 0; m[7] = 0; m[11] = 0; m[15] = 1;
+    mat3 r;
+    int i, k;
+    m3_from_quat(&r, q);
+    for (i = 0; i < 3; ++i)
+        for (k = 0; k < 3; ++k)
+            m[4 * k + i] = r.m[i][k]; /* column-major */
+    m[3] = m[7] = m[11] = 0.0;
+    m[12] = x.x;
+    m[13] = x.y;
+    m[14] = x.z;
+    m[15] = 1.0;
     glMultMatrixd(m);
 }
 
@@ -234,21 +239,6 @@ static void align_z(vec3 p0, vec3 d)
         glRotated(acos(arc_clamp(d.z, -1.0, 1.0)) * 180.0 / ARC_PI, axis.x, axis.y, axis.z);
     else if (d.z < 0.0)
         glRotated(180.0, 1.0, 0.0, 0.0);
-}
-
-static void draw_capsule(const arc_renderer *r, vec3 p0, vec3 p1, double rad)
-{
-    vec3 d = v3_sub(p1, p0);
-    double len = v3_len(d);
-    draw_sphere(r, p0, rad);
-    draw_sphere(r, p1, rad);
-    if (len < 1e-9)
-        return;
-    glPushMatrix();
-    align_z(p0, v3_scale(d, 1.0 / len));
-    glScaled(rad, rad, len);
-    glCallList(r->list_cylinder);
-    glPopMatrix();
 }
 
 static void disc(double z, double rad, double nz)
@@ -343,9 +333,6 @@ static void draw_visual(const arc_renderer *r, const arc_visual *v)
     case ARC_VIS_SPHERE:
         draw_sphere(r, v->p0, v->radius);
         break;
-    case ARC_VIS_CAPSULE:
-        draw_capsule(r, v->p0, v->p1, v->radius);
-        break;
     case ARC_VIS_BOX:
         glPushMatrix();
         glTranslated(v->p0.x, v->p0.y, v->p0.z);
@@ -373,7 +360,7 @@ static void visual_extent(const arc_world *w, const arc_visual *v, vec3 *c, doub
     const arc_body *b = &w->bodies[v->body];
     vec3 local = v->p0;
     *rad = v->radius;
-    if (v->type == ARC_VIS_CAPSULE || v->type == ARC_VIS_TAPER || v->type == ARC_VIS_CYLINDER) {
+    if (v->type == ARC_VIS_TAPER || v->type == ARC_VIS_CYLINDER) {
         local = v3_scale(v3_add(v->p0, v->p1), 0.5);
         *rad = arc_max(v->radius, v->radius2) + 0.35 * v3_len(v3_sub(v->p1, v->p0));
     } else if (v->type == ARC_VIS_BOX) {
@@ -566,13 +553,9 @@ static void handle_events(arc_renderer *r)
 /* ------------------------------------------------------------------------ */
 /* Setup */
 
-static void *gl_proc(const char *name)
-{
-    return SDL_GL_GetProcAddress(name);
-}
-
 /* function pointers cannot be converted from void * in strict ISO C */
-#define LOAD_GL(dst, name) do { void *p_ = gl_proc(name); memcpy(&(dst), &p_, sizeof(p_)); } while (0)
+#define LOAD_GL(dst, name) \
+    do { void *p_ = SDL_GL_GetProcAddress(name); memcpy(&(dst), &p_, sizeof(p_)); } while (0)
 
 static int create_fbo(arc_renderer *r)
 {

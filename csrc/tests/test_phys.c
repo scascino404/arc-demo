@@ -3,34 +3,8 @@
  * free rotation, pendulum), then constraint quality (chains, limits, drives)
  * and contacts (resting, sliding friction, block terrain).
  */
-#include <stdio.h>
 #include "../arc_phys.h"
-
-static int n_fail = 0, n_pass = 0;
-
-static void check(int ok, const char *name, double got, double expected)
-{
-    if (ok) {
-        ++n_pass;
-        printf("  ok    %-44s got % .6f (expected % .6f)\n", name, got, expected);
-    } else {
-        ++n_fail;
-        printf("  FAIL  %-44s got % .6f (expected % .6f)\n", name, got, expected);
-    }
-}
-
-static void check_near(const char *name, double got, double expected, double tol)
-{
-    check(fabs(got - expected) <= tol, name, got, expected);
-}
-
-static void check_below(const char *name, double got, double limit)
-{
-    check(got <= limit, name, got, limit);
-}
-
-#define DT (1.0 / 30.0)
-#define SUBSTEPS 20
+#include "check.h"
 
 static void run(arc_world *w, double seconds)
 {
@@ -339,6 +313,5 @@ int main(void)
     test_sliding();
     test_blocks();
     test_set_pose();
-    printf("\n%d passed, %d failed\n", n_pass, n_fail);
-    return n_fail ? 1 : 0;
+    return check_summary();
 }

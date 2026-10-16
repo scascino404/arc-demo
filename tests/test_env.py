@@ -9,7 +9,7 @@ from gymnasium.utils.env_checker import check_env as gym_check_env
 from stable_baselines3.common.env_checker import check_env as sb3_check_env
 
 from arc import ArcEnv, ArcVecEnv, TaskConfig
-from arc.env import HEIGHT_OFFSETS
+from arc.task import HEIGHT_OFFSETS
 
 
 def test_gymnasium_api():
@@ -185,9 +185,8 @@ def _standing_env(seed):
 
 def _place_target(task, angle, dist):
     """Puts the checkpoint at `angle` (rad) from the gaze, `dist` meters away."""
-    from arc.env import quat_to_mat
-    rot = quat_to_mat(task.sim.root[:, 3:7])
-    heading = np.arctan2(rot[0, 1, 0], rot[0, 0, 0]) + angle
+    rot = task.sim.rot[0]
+    heading = np.arctan2(rot[1, 0], rot[0, 0]) + angle
     task.target[0] = task.sim.root[0, :2] + dist * np.array([np.cos(heading), np.sin(heading)])
     task.prev_dist[0] = dist
     task.prev_gaze[0] = abs(angle)

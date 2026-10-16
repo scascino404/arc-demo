@@ -108,14 +108,6 @@ ARC_INLINE vec3 q_rotate(quat q, vec3 v)
 
 ARC_INLINE vec3 q_inv_rotate(quat q, vec3 v) { return q_rotate(q_conj(q), v); }
 
-/* q <- normalize(q + 0.5 * [w, 0] * q): applies a small rotation vector w. */
-ARC_INLINE quat q_add_rotation(quat q, vec3 w)
-{
-    quat d = q_mul(qt(0.0, w.x, w.y, w.z), q);
-    return q_normalize(qt(q.w + 0.5 * d.w, q.x + 0.5 * d.x,
-                          q.y + 0.5 * d.y, q.z + 0.5 * d.z));
-}
-
 /* Rotation matrix of q / |q| (q need not be normalized, only nonzero). */
 ARC_INLINE void m3_from_quat(mat3 *r, quat q)
 {

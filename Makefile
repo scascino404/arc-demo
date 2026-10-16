@@ -44,18 +44,16 @@ bin/arcview: csrc/tools/arcview.c arc/libarcrender.so arc/libarcsim.so | bin
 bin:
 	mkdir -p $@
 
-$(BUILD)/test_phys: csrc/tests/test_phys.c $(SIM_OBJ)
-	$(CC) $(CFLAGS) $(OMP) $^ -o $@ $(LDLIBS)
+# test programs and the benchmark link the simulation objects statically
+$(BUILD)/test_%: csrc/tests/test_%.c csrc/tests/check.h $(SIM_OBJ)
+	$(CC) $(CFLAGS) $(OMP) $< $(SIM_OBJ) -o $@ $(LDLIBS)
 
-$(BUILD)/test_robot: csrc/tests/test_robot.c $(SIM_OBJ)
+$(BUILD)/bench: csrc/tools/bench.c $(SIM_OBJ)
 	$(CC) $(CFLAGS) $(OMP) $^ -o $@ $(LDLIBS)
 
 test: $(BUILD)/test_phys $(BUILD)/test_robot
 	$(BUILD)/test_phys
 	$(BUILD)/test_robot
-
-$(BUILD)/bench: csrc/tools/bench.c $(SIM_OBJ)
-	$(CC) $(CFLAGS) $(OMP) $^ -o $@ $(LDLIBS)
 
 bench: $(BUILD)/bench
 	$(BUILD)/bench

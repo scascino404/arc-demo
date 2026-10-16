@@ -1,11 +1,24 @@
 /*
- * arc_terrain.h - random block terrain.
+ * arc_terrain.h - block terrain: a grid of axis-aligned columns, and a
+ * random generator for it.
  */
 #ifndef ARC_TERRAIN_H
 #define ARC_TERRAIN_H
 
-#include "arc_phys.h"
 #include "arc_rng.h"
+
+#define ARC_GRID_MAX 64
+
+typedef struct {
+    int nx, ny;
+    double cell;       /* column width (m) */
+    double ox, oy;     /* world position of the minimum corner of cell (0, 0) */
+    double outside;    /* height of the columns outside the grid */
+    double h[ARC_GRID_MAX * ARC_GRID_MAX]; /* column heights, h[ix + iy * nx] */
+} arc_terrain;
+
+/* nx x ny columns of the given height, centered on the origin. */
+void arc_terrain_flat(arc_terrain *t, int nx, int ny, double cell, double height);
 
 /*
  * Fills t with an n x n grid of columns centered on the origin: smooth hills
@@ -15,5 +28,20 @@
  * wall 1 m above the highest column, which keeps robots inside.
  */
 void arc_terrain_generate(arc_terrain *t, int n, double cell, double difficulty, arc_rng *rng);
+
+/* Height of column (ix, iy); t->outside beyond the grid. */
+ARC_INLINE double arc_terrain_cell(const arc_terrain *t, int ix, int iy)
+{
+    if (ix < 0 || iy < 0 || ix >= t->nx || iy >= t->ny)
+        return t->outside;
+    return t->h[ix + iy * t->nx];
+}
+
+/* Height of the column containing the point (x, y). */
+ARC_INLINE double arc_terrain_height(const arc_terrain *t, double x, double y)
+{
+    return arc_terrain_cell(t, (int)floor((x - t->ox) / t->cell),
+                            (int)floor((y - t->oy) / t->cell));
+}
 
 #endif

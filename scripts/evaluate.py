@@ -7,16 +7,14 @@ stalled near a checkpoint, falls and their causes.
 from __future__ import annotations
 
 import argparse
-import os
 from collections import Counter
 from pathlib import Path
 
 import numpy as np
 import torch
-from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import VecNormalize
 
-from arc import ArcVecEnv, TaskConfig
+from arc import TaskConfig
+from arc.runs import default_threads, load_policy
 
 
 def evaluate(run: Path, difficulty: float, envs: int, steps: int, threads: int, seed: int,
@@ -25,14 +23,8 @@ def evaluate(run: Path, difficulty: float, envs: int, steps: int, threads: int, 
     causes, checkpoints per episode and the fraction of time spent stalled:
     within stall_radius of the current checkpoint for over stall_seconds."""
     cfg = TaskConfig(curriculum=False, difficulty=difficulty, max_steps=steps)
-    env = VecNormalize.load(str(run / "vecnormalize.pkl"), ArcVecEnv(envs, cfg, threads=threads, seed=seed))
-    env.training = False
-    env.norm_reward = False
-    policy = PPO.load(run / "model.zip", device="cpu").policy
-    # what model.predict(obs, deterministic=True) computes, without switching
-    # every module to eval mode again on each call
-    policy.set_training_mode(False)
-    task = env.venv.task
+    env, act = load_policy(run, envs, cfg, threads, seed)
+    task = env.unwrapped.task
     obs = env.reset()
     checkpoints = np.zeros(envs)
     alive_steps = np.zeros(envs)
@@ -43,10 +35,8 @@ def evaluate(run: Path, difficulty: float, envs: int, steps: int, threads: int, 
     finished = np.zeros(envs, dtype=bool)
     window = stall_seconds / cfg.dt
     for _ in range(steps):
-        with torch.no_grad():
-            action = policy.get_distribution(torch.as_tensor(obs)).mode().numpy()
         target = task.target.copy()
-        obs, _, done, infos = env.step(action)
+        obs, _, done, infos = env.step(act(obs))
         live = ~finished
         alive_steps += live
         near = np.linalg.norm(target - task.sim.root[:, :2], axis=1) < stall_radius
@@ -73,7 +63,7 @@ def main():
     p.add_argument("--difficulties", type=float, nargs="+", default=[0.0, 0.25, 0.5, 0.75, 1.0])
     p.add_argument("--envs", type=int, default=64)
     p.add_argument("--steps", type=int, default=1000, help="episode length (1000 = 33 s)")
-    p.add_argument("--threads", type=int, default=max(1, (os.cpu_count() or 2) // 2))
+    p.add_argument("--threads", type=int, default=default_threads())
     p.add_argument("--seed", type=int, default=12345)
     args = p.parse_args()
     torch.set_num_threads(args.threads)

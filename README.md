@@ -7,8 +7,10 @@ randomly placed checkpoints, inspired by Embark Studios'
 - `csrc/`: a small C89 physics engine (substepped XPBD), the robot, the terrain
   generator, a batched N-world simulation API parallelized with OpenMP, and an
   SDL2 + OpenGL 2.1 renderer.
-- `arc/`: Python bindings (ctypes), the task logic vectorized with numpy, a
-  Stable Baselines3 `VecEnv` and a Gymnasium env (`Arc-v0`).
+- `arc/`: Python bindings (ctypes, `native.py`), the task logic vectorized
+  with numpy (`task.py`), a Stable Baselines3 `VecEnv` and a Gymnasium env
+  (`Arc-v0`) over it (`env.py`), and loading/saving of training runs
+  (`runs.py`).
 - `scripts/`: training (PPO), playback/recording, benchmarks.
 
 ## Setup
@@ -141,7 +143,7 @@ above the body and the long blade-like shins come down steeply; the feet are
 about 0.8 m from the center. The hip links carry the reflected inertia of
 the hip motors ("armature"), which the solver needs to stay stable.
 
-### Task (`arc/env.py`)
+### Task (`arc/task.py`)
 
 - Actions: 12 joint targets as offsets from the default stance
   (0.6 rad per unit action), tracked by the PD drives.

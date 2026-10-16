@@ -9,16 +9,16 @@ checkpoints, and TensorBoard logs (uv run tensorboard --logdir runs).
 from __future__ import annotations
 
 import argparse
-import os
 from pathlib import Path
 
 import numpy as np
 import torch
 from stable_baselines3 import PPO
-from stable_baselines3.common.callbacks import BaseCallback, CallbackList
+from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.vec_env import VecMonitor, VecNormalize
 
 from arc import ArcVecEnv, TaskConfig
+from arc.runs import default_threads, load_model, load_normalize, save_run
 
 
 def use_bf16_update(policy) -> None:
@@ -63,14 +63,11 @@ class TaskStats(BaseCallback):
                 self.causes.append(infos[i]["cause"])
         if self.num_timesteps >= self.next_save:
             self.next_save += self.save_every
-            path = self.out / "checkpoints" / f"step_{self.num_timesteps}"
-            path.mkdir(parents=True, exist_ok=True)
-            self.model.save(path / "model.zip")
-            self.venv.save(str(path / "vecnormalize.pkl"))
+            save_run(self.out / "checkpoints" / f"step_{self.num_timesteps}", self.model, self.venv)
         return True
 
     def _on_rollout_end(self) -> None:
-        task = self.venv.venv.venv.task  # VecNormalize -> VecMonitor -> ArcVecEnv
+        task = self.venv.unwrapped.task
         if self.checkpoints:
             self.logger.record("task/checkpoints_per_episode", float(np.mean(self.checkpoints)))
             self.logger.record("task/fall_rate", float(np.mean(self.falls)))
@@ -88,7 +85,7 @@ def main():
     p.add_argument("--name", default="run")
     p.add_argument("--steps", type=float, default=20e6)
     p.add_argument("--envs", type=int, default=64)
-    p.add_argument("--threads", type=int, default=max(1, (os.cpu_count() or 2) // 2),
+    p.add_argument("--threads", type=int, default=default_threads(),
                    help="threads for both the simulation and torch (default: half the cores)")
     p.add_argument("--n-steps", type=int, default=256, help="rollout length per env")
     p.add_argument("--lr", type=float, default=3e-4)
@@ -103,7 +100,6 @@ def main():
 
     torch.set_num_threads(args.threads)
     out = Path("runs") / args.name
-    out.mkdir(parents=True, exist_ok=True)
 
     cfg = TaskConfig(max_difficulty=args.max_difficulty)
     if args.difficulty is not None:
@@ -111,10 +107,8 @@ def main():
         cfg.difficulty = args.difficulty
     env = VecMonitor(ArcVecEnv(args.envs, cfg, threads=args.threads, seed=args.seed))
     if args.resume:
-        env = VecNormalize.load(str(args.resume / "vecnormalize.pkl"), env)
-        env.training = True
-        model = PPO.load(args.resume / "model.zip", env=env, device="cpu",
-                         tensorboard_log=str(out / "tb"))
+        env = load_normalize(args.resume, env, training=True)
+        model = load_model(args.resume, env, tensorboard_log=str(out / "tb"))
     else:
         env = VecNormalize(env, norm_obs=True, norm_reward=True, clip_obs=10.0, gamma=0.99)
         model = PPO(
@@ -142,11 +136,10 @@ def main():
 
     stats = TaskStats(out, save_every=2_000_000, venv=env)
     try:
-        model.learn(total_timesteps=int(args.steps), callback=CallbackList([stats]),
+        model.learn(total_timesteps=int(args.steps), callback=stats,
                     reset_num_timesteps=args.resume is None, tb_log_name="ppo")
     finally:
-        model.save(out / "model.zip")
-        env.save(str(out / "vecnormalize.pkl"))
+        save_run(out, model, env)
         print(f"saved to {out}")
         env.close()
 

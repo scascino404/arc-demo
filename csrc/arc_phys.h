@@ -14,14 +14,13 @@
 #ifndef ARC_PHYS_H
 #define ARC_PHYS_H
 
-#include "arc_math.h"
+#include "arc_terrain.h"
 
 #define ARC_MAX_BODIES 16
 #define ARC_MAX_JOINTS 16
 #define ARC_MAX_SPHERES 48
 #define ARC_MAX_CONTACTS 128
 #define ARC_MAX_VISUALS 48
-#define ARC_GRID_MAX 64
 
 typedef struct {
     vec3 x, x_prev;    /* center of mass position */
@@ -68,17 +67,8 @@ typedef struct {
     double lambda_n;   /* normal impulse of the position solve */
 } arc_contact;
 
-typedef struct {
-    int nx, ny;
-    double cell;       /* column width (m) */
-    double ox, oy;     /* world position of the minimum corner of cell (0, 0) */
-    double outside;    /* height of the columns outside the grid */
-    double h[ARC_GRID_MAX * ARC_GRID_MAX]; /* column heights, h[ix + iy * nx] */
-} arc_terrain;
-
 enum {
     ARC_VIS_SPHERE,    /* p0 center, radius */
-    ARC_VIS_CAPSULE,   /* p0-p1 segment, radius */
     ARC_VIS_BOX,       /* p0 center, p1 half extents (body axes) */
     ARC_VIS_TAPER,     /* square prism along p0-p1, half width radius at p0, radius2 at p1 */
     ARC_VIS_CYLINDER,  /* closed cylinder along p0-p1, radius */
@@ -132,11 +122,6 @@ void arc_world_set_pose(arc_world *w, vec3 pos, quat q, const double *angles);
 /* Current joint angle / rate (also cached in the joint after each step). */
 double arc_joint_angle(const arc_world *w, const arc_joint *j);
 double arc_joint_rate(const arc_world *w, const arc_joint *j);
-
-/* Terrain helpers. */
-void arc_terrain_flat(arc_terrain *t, int nx, int ny, double cell, double height);
-double arc_terrain_height(const arc_terrain *t, double x, double y);
-double arc_terrain_cell(const arc_terrain *t, int ix, int iy);
 
 /* Total mechanical energy (kinetic + gravitational potential). */
 double arc_world_energy(const arc_world *w);

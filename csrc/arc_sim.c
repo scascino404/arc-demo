@@ -16,6 +16,9 @@ struct arc_sim {
     int grid;
     double cell;
     arc_robot_info info;
+    /* contact channel of each sphere: foot index, ARC_ROBOT_LEGS for the
+     * torso, ARC_ROBOT_LEGS + 1 for the other leg parts */
+    int sphere_channel[ARC_MAX_SPHERES];
     arc_world *template_world;  /* robot as built, flat ground */
     arc_world *worlds;
 };
@@ -41,6 +44,10 @@ arc_sim *arc_sim_create(int n_worlds, double dt, int substeps, int grid, double 
     arc_world_init(s->template_world);
     arc_robot_build(s->template_world, &s->info);
     arc_terrain_flat(&s->template_world->terrain, s->grid, s->grid, cell, 0.0);
+    for (i = 0; i < s->template_world->n_spheres; ++i)
+        s->sphere_channel[i] = i < s->info.n_torso_spheres ? ARC_ROBOT_LEGS : ARC_ROBOT_LEGS + 1;
+    for (i = 0; i < ARC_ROBOT_LEGS; ++i)
+        s->sphere_channel[s->info.foot_sphere[i]] = i;
     for (i = 0; i < n_worlds; ++i)
         memcpy(&s->worlds[i], s->template_world, sizeof(arc_world));
     return s;
@@ -162,24 +169,13 @@ void arc_sim_observe(const arc_sim *s, double *root, double *rot, double *joints
             }
         }
         if (contacts) {
-            double *o = contacts + i * ARC_SIM_CONTACT_SIZE;
-            double torso = 0.0, other = 0.0, inv = 1.0 / s->substeps;
-            int is_foot;
-            for (j = 0; j < ARC_ROBOT_LEGS; ++j)
-                o[j] = w->spheres[s->info.foot_sphere[j]].touch * inv;
+            double *o = contacts + i * ARC_SIM_CONTACT_SIZE, inv = 1.0 / s->substeps;
+            for (j = 0; j < ARC_SIM_CONTACT_SIZE; ++j)
+                o[j] = 0.0;
             for (j = 0; j < w->n_spheres; ++j) {
-                int k;
-                double t = w->spheres[j].touch * inv;
-                is_foot = 0;
-                for (k = 0; k < ARC_ROBOT_LEGS; ++k)
-                    is_foot |= s->info.foot_sphere[k] == j;
-                if (j < s->info.n_torso_spheres)
-                    torso = arc_max(torso, t);
-                else if (!is_foot)
-                    other = arc_max(other, t);
+                double *c = &o[s->sphere_channel[j]];
+                *c = arc_max(*c, w->spheres[j].touch * inv);
             }
-            o[ARC_ROBOT_LEGS] = torso;
-            o[ARC_ROBOT_LEGS + 1] = other;
         }
         if (flags)
             flags[i] = w->unstable;

@@ -16,7 +16,6 @@ _HERE = Path(__file__).resolve().parent
 _f64 = np.ctypeslib.ndpointer(dtype=np.float64, flags="C_CONTIGUOUS")
 _i32 = np.ctypeslib.ndpointer(dtype=np.int32, flags="C_CONTIGUOUS")
 _u32 = np.ctypeslib.ndpointer(dtype=np.uint32, flags="C_CONTIGUOUS")
-_u8 = np.ctypeslib.ndpointer(dtype=np.uint8, flags="C_CONTIGUOUS")
 _vp = ctypes.c_void_p
 
 ROOT_SIZE = 13  # pos(3) quat wxyz(4) linvel(3) angvel(3)
@@ -98,12 +97,9 @@ class Sim:
 
         nj = self.num_joints
         self.default_angles = np.zeros(nj)
-        self.joint_lo = np.zeros(nj)
-        self.joint_hi = np.zeros(nj)
-        misc = np.zeros(2)
-        self._lib.arc_sim_robot_info(self._ptr, self.default_angles, self.joint_lo,
-                                     self.joint_hi, misc)
-        self.stand_height, self.mass = float(misc[0]), float(misc[1])
+        lo, hi, misc = np.zeros(nj), np.zeros(nj), np.zeros(2)  # limits, mass: unused here
+        self._lib.arc_sim_robot_info(self._ptr, self.default_angles, lo, hi, misc)
+        self.stand_height = float(misc[0])
 
         # output buffers, reused by observe()
         self.root = np.zeros((num_worlds, ROOT_SIZE))

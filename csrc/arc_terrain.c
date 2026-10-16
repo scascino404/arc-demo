@@ -1,7 +1,7 @@
 /*
- * arc_terrain.c - random block terrain: two octaves of value noise for the
- * hills, uniform per-column jitter for the blocky look, then quantization so
- * neighbouring columns form distinct steps.
+ * arc_terrain.c - block terrain. The random generator sums two octaves of
+ * value noise for the hills and uniform per-column jitter for the blocky
+ * look, then quantizes so neighbouring columns form distinct steps.
  */
 #include "arc_terrain.h"
 
@@ -14,6 +14,21 @@
 #define WALL 1.0                /* boundary wall height above the highest column */
 
 #define LATTICE_MAX (ARC_GRID_MAX / BUMP_SPACING + 3)
+
+void arc_terrain_flat(arc_terrain *t, int nx, int ny, double cell, double height)
+{
+    int i;
+    if (nx > ARC_GRID_MAX) nx = ARC_GRID_MAX;
+    if (ny > ARC_GRID_MAX) ny = ARC_GRID_MAX;
+    t->nx = nx;
+    t->ny = ny;
+    t->cell = cell;
+    t->ox = -0.5 * nx * cell;
+    t->oy = -0.5 * ny * cell;
+    t->outside = height;
+    for (i = 0; i < nx * ny; ++i)
+        t->h[i] = height;
+}
 
 static double smooth(double t) { return t * t * (3.0 - 2.0 * t); }
 

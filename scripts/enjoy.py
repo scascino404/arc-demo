@@ -15,23 +15,12 @@ import argparse
 import time
 from pathlib import Path
 
-import numpy as np
 from PIL import Image
-from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import VecNormalize
 
-from arc import ArcVecEnv, TaskConfig
+from arc import TaskConfig
+from arc.runs import load_policy
 
 KEY_R, KEY_SPACE, KEY_0, KEY_9 = ord("r"), ord(" "), ord("0"), ord("9")
-
-
-def load(run: Path, cfg: TaskConfig, render_mode: str, seed: int):
-    env = ArcVecEnv(1, cfg, seed=seed, render_mode=render_mode)
-    env = VecNormalize.load(str(run / "vecnormalize.pkl"), env)
-    env.training = False
-    env.norm_reward = False
-    model = PPO.load(run / "model.zip", device="cpu")
-    return env, model
 
 
 def main():
@@ -46,18 +35,17 @@ def main():
     args = p.parse_args()
 
     cfg = TaskConfig(curriculum=False, difficulty=args.difficulty, max_steps=10**9)
-    env, model = load(args.run, cfg, "rgb_array" if args.record else "human", args.seed)
-    arc_env: ArcVecEnv = env.venv
-    task = arc_env.task
+    env, act = load_policy(args.run, 1, cfg, seed=args.seed,
+                           render_mode="rgb_array" if args.record else "human")
+    viewer, task = env.unwrapped.viewer, env.unwrapped.task
+    viewer.set_view(args.view)
+    deterministic = not args.stochastic
     obs = env.reset()
-    env.render()
-    arc_env._view.renderer.set_view(args.view)
 
     if args.record:
         frames = []
         for t in range(int(args.seconds / cfg.dt)):
-            action, _ = model.predict(obs, deterministic=not args.stochastic)
-            obs, _, done, _ = env.step(action)
+            obs = env.step(act(obs, deterministic))[0]
             img = env.render()
             if t % 2 == 0:  # 15 fps keeps the GIF small
                 frames.append(Image.fromarray(img).quantize(colors=128, method=Image.Quantize.MEDIANCUT))
@@ -70,8 +58,7 @@ def main():
     paused = False
     next_t = time.perf_counter()
     while True:
-        renderer = arc_env._view.renderer
-        for key in renderer.keys() if renderer else []:
+        for key in viewer.keys():
             if key == KEY_SPACE:
                 paused = not paused
             elif key == KEY_R or KEY_0 <= key <= KEY_9:
@@ -79,12 +66,11 @@ def main():
                     task.level[:] = (key - KEY_0) / 9.0
                 obs = env.reset()
         if not paused:
-            action, _ = model.predict(obs, deterministic=not args.stochastic)
-            obs, _, done, infos = env.step(action)
+            obs, _, done, infos = env.step(act(obs, deterministic))
             if done[0]:
                 print(f"episode end: {infos[0]['checkpoints']} checkpoints, fell={infos[0]['fell']}")
         env.render()
-        if arc_env.window_closed:
+        if viewer.closed:
             break
         next_t += cfg.dt
         delay = next_t - time.perf_counter()

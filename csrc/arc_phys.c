@@ -43,11 +43,12 @@ HOT int is_isotropic(vec3 inertia)
 }
 
 /*
- * q + 0.5 [w, 0] q: q_add_rotation without the normalization. Inside a
- * substep the solver lets |q| drift from 1 (the update is linear in q, so
- * the rotation it represents is unaffected, and body_sync scales by 1/|q|^2)
- * and normalizes once before deriving velocities. That keeps a sqrt and a
- * division off the serial chain of constraint solves.
+ * q + 0.5 [w, 0] q: applies the small rotation vector w, without
+ * renormalizing. Inside a substep the solver lets |q| drift from 1 (the
+ * update is linear in q, so the rotation it represents is unaffected, and
+ * body_sync scales by 1/|q|^2) and normalizes once before deriving
+ * velocities. That keeps a sqrt and a division off the serial chain of
+ * constraint solves.
  */
 HOT quat q_turn(quat q, vec3 w)
 {
@@ -159,37 +160,6 @@ int arc_add_visual(arc_world *w, int type, int body, vec3 p0, vec3 p1,
     v->color[1] = g;
     v->color[2] = b;
     return w->n_visuals++;
-}
-
-/* ------------------------------------------------------------------------ */
-/* Terrain */
-
-void arc_terrain_flat(arc_terrain *t, int nx, int ny, double cell, double height)
-{
-    int i;
-    if (nx > ARC_GRID_MAX) nx = ARC_GRID_MAX;
-    if (ny > ARC_GRID_MAX) ny = ARC_GRID_MAX;
-    t->nx = nx;
-    t->ny = ny;
-    t->cell = cell;
-    t->ox = -0.5 * nx * cell;
-    t->oy = -0.5 * ny * cell;
-    t->outside = height;
-    for (i = 0; i < nx * ny; ++i)
-        t->h[i] = height;
-}
-
-double arc_terrain_cell(const arc_terrain *t, int ix, int iy)
-{
-    if (ix < 0 || iy < 0 || ix >= t->nx || iy >= t->ny)
-        return t->outside;
-    return t->h[ix + iy * t->nx];
-}
-
-double arc_terrain_height(const arc_terrain *t, double x, double y)
-{
-    return arc_terrain_cell(t, (int)floor((x - t->ox) / t->cell),
-                            (int)floor((y - t->oy) / t->cell));
 }
 
 /* ------------------------------------------------------------------------ */

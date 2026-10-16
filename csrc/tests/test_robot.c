@@ -3,29 +3,12 @@
  * flat ground, surviving random actions on rough terrain, determinism and
  * thread independence.
  */
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "../arc_sim.h"
-#include "../arc_rng.h"
-#include "../arc_terrain.h"
+#include "check.h"
 
-#define DT (1.0 / 30.0)
-#define SUBSTEPS 20
 #define NJ ARC_ROBOT_JOINTS
-
-static int n_fail = 0, n_pass = 0;
-
-static void check(int ok, const char *name, double got, double expected)
-{
-    if (ok) ++n_pass; else ++n_fail;
-    printf("  %-5s %-44s got % .6f (expected % .6f)\n", ok ? "ok" : "FAIL", name, got, expected);
-}
-
-static void check_below(const char *name, double got, double limit)
-{
-    check(got <= limit, name, got, limit);
-}
 
 static void reset_all(arc_sim *s, unsigned int seed, double difficulty)
 {
@@ -171,6 +154,5 @@ int main(void)
     test_stand();
     test_random();
     test_determinism();
-    printf("\n%d passed, %d failed\n", n_pass, n_fail);
-    return n_fail ? 1 : 0;
+    return check_summary();
 }
