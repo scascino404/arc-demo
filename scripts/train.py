@@ -32,12 +32,14 @@ class TaskStats(BaseCallback):
         self.next_save = save_every
         self.checkpoints: list[int] = []
         self.falls: list[bool] = []
+        self.causes: list[str] = []
 
     def _on_step(self) -> bool:
         for info in self.locals["infos"]:
             if "checkpoints" in info:
                 self.checkpoints.append(info["checkpoints"])
                 self.falls.append(info["fell"])
+                self.causes.append(info["cause"])
         if self.num_timesteps >= self.next_save:
             self.next_save += self.save_every
             path = self.out / "checkpoints" / f"step_{self.num_timesteps}"
@@ -51,10 +53,13 @@ class TaskStats(BaseCallback):
         if self.checkpoints:
             self.logger.record("task/checkpoints_per_episode", float(np.mean(self.checkpoints)))
             self.logger.record("task/fall_rate", float(np.mean(self.falls)))
+            for cause in ("flip", "beached", "unstable"):
+                self.logger.record(f"task/fall_{cause}", float(np.mean([c == cause for c in self.causes])))
         self.logger.record("task/difficulty_mean", float(task.level.mean()))
         self.logger.record("task/difficulty_max", float(task.level.max()))
         self.checkpoints.clear()
         self.falls.clear()
+        self.causes.clear()
 
 
 def main():

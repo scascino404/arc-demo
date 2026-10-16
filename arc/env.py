@@ -32,17 +32,29 @@ class TaskConfig:
     # episode
     max_steps: int = 1000
     action_scale: float = 0.6         # rad per unit action, around the default stance
-    checkpoint_radius: float = 0.4
+    checkpoint_radius: float = 0.5       # torso center within this distance (drawn ring)
     checkpoint_min_dist: float = 3.0
     checkpoint_max_dist: float = 6.0
     border: float = 1.5               # keep checkpoints this far from the boundary walls
-    # rewards
+    # Rewards, per control step. The progress term is capped so that speed is
+    # not rewarded beyond max_speed (an uncapped one breeds frantic bounding
+    # gaits), and the time cost makes hovering or orbiting near a checkpoint
+    # a losing strategy. Its discounted sum, w_time / (1 - gamma) = 5, stays
+    # below w_fall, so ending the episode on purpose never pays.
     w_progress: float = 10.0          # per meter towards the checkpoint
+    max_speed: float = 1.2            # m/s; faster approach earns nothing more
     w_checkpoint: float = 10.0
+    w_time: float = 0.05
     w_fall: float = 10.0
     w_energy: float = 0.002           # per joule of positive + negative joint work
     w_action_rate: float = 0.005      # per squared action change
-    w_body_contact: float = 0.02      # per step with knees / shins touching
+    w_body_contact: float = 0.02      # knees / shins touching
+    w_torso_contact: float = 0.5      # torso touching (scraping over a step)
+    w_body_rate: float = 0.01         # per (rad/s)^2 of torso roll / pitch rate
+    w_bounce: float = 0.05            # per (m/s)^2 of torso vertical velocity
+    # terminations: flipping over, or the torso resting on the ground too long
+    flip_up_z: float = 0.3            # torso up axis z below this (tilt > 72 degrees)
+    beached_steps: int = 30           # consecutive steps of torso contact
     # terrain curriculum: per-world difficulty level in [0, max_difficulty]
     curriculum: bool = True
     difficulty: float = 0.0           # fixed difficulty when curriculum is off
@@ -51,6 +63,9 @@ class TaskConfig:
     level_up_checkpoints: int = 3     # promote after reaching this many in an episode
     level_down_steps: int = 300       # demote after falling this early without any checkpoint
 
+
+# termination causes reported in infos["cause"]
+CAUSES = ("", "flip", "beached", "unstable")
 
 # heightmap sample grid around the torso, (forward, left) in meters; it covers
 # the feet (about 0.9 m from the torso center) plus some look-ahead
@@ -90,6 +105,7 @@ class ArcTask:
         self.target_z = np.zeros(n)
         self.prev_dist = np.zeros(n)
         self.prev_action = np.zeros((n, nj))
+        self.torso_steps = np.zeros(n, dtype=np.int64)
         self.steps = np.zeros(n, dtype=np.int64)
         self.checkpoints = np.zeros(n, dtype=np.int64)
         self.ep_return = np.zeros(n)
@@ -106,6 +122,7 @@ class ArcTask:
         self.difficulty[ids] = self.level[ids]
         self.sim.reset(ids, seeds, self.difficulty[ids])
         self.prev_action[ids] = 0.0
+        self.torso_steps[ids] = 0
         self.steps[ids] = 0
         self.checkpoints[ids] = 0
         self.ep_return[ids] = 0.0
@@ -150,23 +167,32 @@ class ArcTask:
 
         pos = root[:, :3]
         dist = np.linalg.norm(self.target - pos[:, :2], axis=1)
-        progress = self.prev_dist - dist
+        progress = np.minimum(self.prev_dist - dist, cfg.max_speed * cfg.dt)
         reached = dist < cfg.checkpoint_radius
 
+        rot = quat_to_mat(root[:, 3:7])
+        body_rate = np.einsum("nji,nj->ni", rot, root[:, 10:13])[:, :2]  # roll, pitch
+        torso = contacts[:, nl] > 0
+        self.torso_steps = np.where(torso, self.torso_steps + 1, 0)
         power = np.abs(joints[:, nj:2 * nj] * joints[:, 2 * nj:]).sum(1)
         rate = np.square(a - self.prev_action).sum(1)
         reward = (cfg.w_progress * progress
                   + cfg.w_checkpoint * reached
+                  - cfg.w_time
                   - cfg.w_energy * power * cfg.dt
                   - cfg.w_action_rate * rate
-                  - cfg.w_body_contact * (contacts[:, nl + 1] > 0))
+                  - cfg.w_body_contact * (contacts[:, nl + 1] > 0)
+                  - cfg.w_torso_contact * torso
+                  - cfg.w_body_rate * np.square(body_rate).sum(1)
+                  - cfg.w_bounce * np.square(root[:, 9]))
 
-        up_z = 1 - 2 * (root[:, 4] ** 2 + root[:, 5] ** 2)
         # the boundary walls keep robots in; escaping anyway means a solver failure
         out = np.any(np.abs(pos[:, :2]) > sim.half_extent + 0.5, axis=1)
-        fell = (contacts[:, nl] > 0) | (up_z < 0.3) | (flags != 0) | out
-        bad = ~np.all(np.isfinite(root), axis=1)
-        fell |= bad
+        bad = (flags != 0) | out | ~np.all(np.isfinite(root), axis=1)
+        flip = rot[:, 2, 2] < cfg.flip_up_z
+        beached = self.torso_steps > cfg.beached_steps
+        fell = flip | beached | bad
+        cause = np.where(bad, 3, np.where(flip, 1, np.where(beached, 2, 0)))
         reward = np.where(fell, reward - cfg.w_fall, reward)
         reward = np.where(bad, -cfg.w_fall, reward)
 
@@ -181,7 +207,7 @@ class ArcTask:
         terminated = fell
         truncated = (self.steps >= cfg.max_steps) & ~terminated
         stats = {"checkpoints": self.checkpoints.copy(), "difficulty": self.difficulty.copy(),
-                 "fell": fell.copy(), "steps": self.steps.copy()}
+                 "fell": fell.copy(), "cause": cause, "steps": self.steps.copy()}
         done = np.flatnonzero(terminated | truncated)
         if len(done) and cfg.curriculum:
             self._update_levels(done, fell)
@@ -228,7 +254,9 @@ class ArcTask:
         return np.nan_to_num(obs, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
 
     def markers(self, i: int) -> np.ndarray:
-        return np.array([[self.target[i, 0], self.target[i, 1], self.target_z[i]]])
+        """Checkpoints to draw for world i, rows of (x, y, z, radius)."""
+        return np.array([[self.target[i, 0], self.target[i, 1], self.target_z[i],
+                          self.cfg.checkpoint_radius]])
 
     def close(self) -> None:
         self.sim.close()
@@ -309,6 +337,7 @@ class ArcVecEnv(VecEnv):
                 "checkpoints": int(stats["checkpoints"][i]),
                 "difficulty": float(stats["difficulty"][i]),
                 "fell": bool(stats["fell"][i]),
+                "cause": CAUSES[stats["cause"][i]],
             }
         if len(ended):
             self.task.reset(ended)
@@ -364,6 +393,7 @@ class ArcEnv(gym.Env):
     def step(self, action):
         reward, terminated, truncated, stats = self.task.step(np.asarray(action)[None])
         info = {k: v[0].item() for k, v in stats.items()}
+        info["cause"] = CAUSES[info["cause"]]
         return self.task.observe()[0], float(reward[0]), bool(terminated[0]), bool(truncated[0]), info
 
     def render(self):

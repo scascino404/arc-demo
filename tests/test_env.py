@@ -115,3 +115,59 @@ def test_rgb_render():
     assert img.shape == (360, 640, 3) and img.dtype == np.uint8
     assert img.std() > 10  # not a blank frame
     env.close()
+
+
+# -- reward robustness ---------------------------------------------------------
+
+def test_no_reward_for_ending_episodes_on_purpose():
+    cfg = TaskConfig()
+    gamma = 0.99  # PPO discount used by scripts/train.py
+    # standing still forever costs less than falling once
+    assert cfg.w_time / (1 - gamma) < cfg.w_fall
+
+
+def test_hovering_near_a_checkpoint_costs():
+    env = ArcVecEnv(4, TaskConfig(curriculum=False), seed=5)
+    env.reset()
+    task = env.task
+    for _ in range(150):
+        env.step(np.zeros((4, 12), dtype=np.float32))
+    # checkpoint just outside the radius, robot standing still
+    task.target[:] = task.sim.root[:, :2] + [task.cfg.checkpoint_radius + 0.3, 0.0]
+    task.prev_dist[:] = task.cfg.checkpoint_radius + 0.3
+    rewards = [env.step(np.zeros((4, 12), dtype=np.float32))[1] for _ in range(30)]
+    assert np.all(np.sum(rewards, axis=0) < 0)
+    env.close()
+
+
+def test_progress_reward_is_capped():
+    cfg = TaskConfig(curriculum=False)
+    env = ArcVecEnv(1, cfg, seed=6)
+    env.reset()
+    task = env.task
+    # pretend the robot covered 1 m in one step: worth only max_speed * dt
+    task.prev_dist[0] += 1.0
+    _, rew, _, _ = env.step(np.zeros((1, 12), dtype=np.float32))
+    assert rew[0] <= cfg.w_progress * cfg.max_speed * cfg.dt + 1e-6
+    env.close()
+
+
+def test_torso_contact_is_penalized_then_terminal():
+    cfg = TaskConfig(curriculum=False)
+    env = ArcVecEnv(1, cfg, seed=7)
+    env.reset()
+    task = env.task
+    # femurs up, shins pointing outwards: the torso drops onto the ground
+    fold = np.tile([0.0, 1.0, 1.0], 4)[None].astype(np.float32)
+    first_contact, end, cause = None, None, None
+    for t in range(120):
+        _, rew, done, infos = env.step(fold)
+        if first_contact is None and task.torso_steps[0] > 0:
+            first_contact = t
+            assert not done[0]  # touching alone does not end the episode
+        if done[0]:
+            end, cause = t, infos[0]["cause"]
+            break
+    assert first_contact is not None and end is not None
+    assert cause == "beached" and end - first_contact >= cfg.beached_steps
+    env.close()

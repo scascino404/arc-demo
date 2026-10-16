@@ -16,8 +16,8 @@ arc_renderer *arc_render_create(int width, int height, int visible);
 void arc_render_destroy(arc_renderer *r);
 
 /*
- * Draws world `world` of the simulation. markers: n_markers points (x, y, z)
- * drawn as checkpoints, the one at index `active` highlighted (-1: none).
+ * Draws world `world` of the simulation. markers: n_markers checkpoints as
+ * (x, y, z, radius), the one at index `active` highlighted (-1: none).
  * If rgb is not NULL, it receives width * height * 3 bytes, top row first.
  * Returns 0 once the window has been closed (Escape / Q / close button).
  */

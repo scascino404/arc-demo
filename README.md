@@ -87,9 +87,16 @@ the torso and the shins come down steeply, feet about 0.9 m from the center.
   angular velocity, joint angles and rates, previous action, direction and
   distance to the checkpoint, a 13x11 heightmap around the torso, foot
   contacts.
-- Reward: progress towards the checkpoint, a bonus per checkpoint, small
-  penalties for joint work, action changes and knee/shin contacts; falling
-  (torso contact, tipping over) ends the episode with a penalty.
+- Reward: progress towards the checkpoint (capped at 1.2 m/s, so speed
+  beyond that earns nothing), a bonus per checkpoint (torso within 0.5 m,
+  the drawn ring), a small time cost, and penalties for joint work, action
+  changes, torso/knee contact, torso roll/pitch rate and vertical bounce.
+- Episodes end when the robot flips (tilt > 72 degrees) or rests on its
+  torso for over 1 s, with a penalty. The time cost's discounted sum (5)
+  stays below the fall penalty (10), so ending an episode on purpose never
+  pays, and hovering or orbiting near a checkpoint loses reward.
+  `tests/test_env.py` checks these properties; `scripts/evaluate.py` reports
+  time spent stalled near checkpoints and fall causes.
 - Curriculum: each world has its own terrain level (0 = flat to 1, in steps
   of 0.1, scaling hills, bumps and block jitter). It rises after episodes
   with 3+ checkpoints and drops after falls in the first 10 s without any

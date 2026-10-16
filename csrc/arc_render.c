@@ -329,7 +329,8 @@ static void draw_markers(const arc_renderer *r, const double *m, int n, int acti
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     for (i = 0; i < n; ++i) {
-        vec3 base = v3(m[3 * i], m[3 * i + 1], m[3 * i + 2]);
+        vec3 base = v3(m[4 * i], m[4 * i + 1], m[4 * i + 2]);
+        double radius = m[4 * i + 3];
         double bob = 0.06 * sin(3.0 * time);
         if (i == active)
             glColor4f(1.0f, 0.55f, 0.12f, 0.85f);
@@ -341,10 +342,10 @@ static void draw_markers(const arc_renderer *r, const double *m, int n, int acti
         glScaled(0.03, 0.03, 1.0);
         glCallList(r->list_cylinder);
         glPopMatrix();
-        /* ground ring */
+        /* ground ring at the actual checkpoint radius */
         glPushMatrix();
         glTranslated(base.x, base.y, base.z + 0.01);
-        glScaled(0.5, 0.5, 0.02);
+        glScaled(radius, radius, 0.02);
         glCallList(r->list_cylinder);
         glPopMatrix();
     }

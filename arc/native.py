@@ -179,7 +179,8 @@ class Renderer:
 
     def frame(self, sim: Sim, world: int = 0, markers: np.ndarray | None = None,
               active: int = -1, rgb: bool = False) -> np.ndarray | None:
-        """Draws the world; returns an (H, W, 3) uint8 image if rgb is set."""
+        """Draws the world with checkpoint markers given as rows of (x, y, z,
+        radius); returns an (H, W, 3) uint8 image if rgb is set."""
         img = None
         img_ptr = None
         if rgb:
@@ -188,7 +189,7 @@ class Renderer:
             img_ptr = img.ctypes.data
         m_ptr, n = None, 0
         if markers is not None and len(markers):
-            markers = np.ascontiguousarray(markers, dtype=np.float64).reshape(-1, 3)
+            markers = np.ascontiguousarray(markers, dtype=np.float64).reshape(-1, 4)
             m_ptr, n = markers.ctypes.data, len(markers)
         if not self._lib.arc_render_frame(self._ptr, sim.ptr, world, m_ptr, n, active, img_ptr):
             self.closed = True
