@@ -1,0 +1,6 @@
+-std=c89
+-pedantic
+-Wall
+-Wextra
+-I/usr/include/SDL2
+-D_REENTRANT

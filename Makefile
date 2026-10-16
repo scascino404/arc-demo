@@ -9,12 +9,15 @@ LDLIBS  := -lm
 
 BUILD   := build
 
+SDL_CFLAGS := $(shell pkg-config --cflags sdl2)
+SDL_LIBS   := $(shell pkg-config --libs sdl2) -lGL
+
 SIM_SRC := csrc/arc_phys.c csrc/arc_robot.c csrc/arc_terrain.c csrc/arc_sim.c
 SIM_OBJ := $(SIM_SRC:csrc/%.c=$(BUILD)/%.o)
 
 .PHONY: all test bench clean
 
-all: arc/libarcsim.so
+all: arc/libarcsim.so arc/libarcrender.so bin/arcview
 
 $(BUILD)/%.o: csrc/%.c csrc/*.h | $(BUILD)
 	$(CC) $(CFLAGS) $(OMP) -c $< -o $@
@@ -24,6 +27,20 @@ $(BUILD):
 
 arc/libarcsim.so: $(SIM_OBJ)
 	$(CC) -shared $(OMP) $^ -o $@ $(LDLIBS)
+
+$(BUILD)/arc_render.o: csrc/arc_render.c csrc/*.h | $(BUILD)
+	$(CC) $(CFLAGS) $(SDL_CFLAGS) -c $< -o $@
+
+# the renderer finds libarcsim.so next to itself
+arc/libarcrender.so: $(BUILD)/arc_render.o arc/libarcsim.so
+	$(CC) -shared $< -o $@ -Larc -larcsim $(SDL_LIBS) $(LDLIBS) -Wl,-rpath,'$$ORIGIN'
+
+bin/arcview: csrc/tools/arcview.c arc/libarcrender.so arc/libarcsim.so | bin
+	$(CC) $(CFLAGS) $(SDL_CFLAGS) $< -o $@ -Larc -larcrender -larcsim $(SDL_LIBS) $(LDLIBS) \
+		-Wl,-rpath,'$$ORIGIN/../arc'
+
+bin:
+	mkdir -p $@
 
 $(BUILD)/test_phys: csrc/tests/test_phys.c $(SIM_OBJ)
 	$(CC) $(CFLAGS) $(OMP) $^ -o $@ $(LDLIBS)
