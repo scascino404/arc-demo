@@ -44,7 +44,8 @@ class TaskConfig:
     w_turn: float = 1.0               # per radian of gaze error reduction
     w_checkpoint: float = 10.0
     w_time: float = 0.05
-    w_fall: float = 10.0
+    w_fall: float = 20.0              # well above that: learning to keep its footing
+                                      # first makes training take off sooner
     w_energy: float = 0.002           # per joule of positive + negative joint work
     w_action_rate: float = 0.005      # per squared action change
     w_body_contact: float = 0.02      # knees / shins touching

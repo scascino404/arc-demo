@@ -18,14 +18,16 @@ from pathlib import Path
 from PIL import Image
 
 from arc import TaskConfig
-from arc.runs import load_policy
+from arc.runs import latest_checkpoint, load_policy
 
 KEY_R, KEY_SPACE, KEY_0, KEY_9 = ord("r"), ord(" "), ord("0"), ord("9")
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("run", type=Path, help="directory with model.zip and vecnormalize.pkl")
+    p.add_argument("run", type=Path,
+                   help="run directory (plays its checkpoint with the most steps) or a "
+                        "directory with model.zip and vecnormalize.pkl")
     p.add_argument("--difficulty", type=float, default=0.0)
     p.add_argument("--stochastic", action="store_true", help="sample actions instead of the mean")
     p.add_argument("--record", type=Path, default=None, help="write a GIF instead of opening a window")
@@ -34,8 +36,10 @@ def main():
     p.add_argument("--view", type=int, default=0, help="camera: 0 behind, 1 side, 2 front")
     args = p.parse_args()
 
+    run = latest_checkpoint(args.run)
+    print(f"playing {run}")
     cfg = TaskConfig(curriculum=False, difficulty=args.difficulty, max_steps=10**9)
-    env, act = load_policy(args.run, 1, cfg, seed=args.seed,
+    env, act = load_policy(run, 1, cfg, seed=args.seed,
                            render_mode="rgb_array" if args.record else "human")
     viewer, task = env.unwrapped.viewer, env.unwrapped.task
     viewer.set_view(args.view)

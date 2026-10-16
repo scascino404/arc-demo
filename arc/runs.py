@@ -1,5 +1,6 @@
 """Training runs on disk: a directory with the PPO model (model.zip) and the
-observation normalization statistics (vecnormalize.pkl)."""
+observation normalization statistics (vecnormalize.pkl), and periodic
+checkpoints of both in checkpoints/step_<steps>/."""
 
 from __future__ import annotations
 
@@ -22,6 +23,17 @@ NORMALIZE = "vecnormalize.pkl"
 def default_threads() -> int:
     """Half the cores: SMT threads add nothing to the solver or to torch."""
     return max(1, (os.cpu_count() or 2) // 2)
+
+
+def latest_checkpoint(path: Path) -> Path:
+    """The checkpoint with the most training steps in a run directory (in
+    path/checkpoints/ or path itself), or path if it holds no checkpoints."""
+    steps = {}
+    for d in (path / "checkpoints", path):
+        for c in d.glob("step_*"):
+            if c.name[5:].isdigit() and (c / MODEL).is_file():
+                steps[int(c.name[5:])] = c
+    return steps[max(steps)] if steps else path
 
 
 def save_run(path: Path, model: PPO, env: VecNormalize) -> None:

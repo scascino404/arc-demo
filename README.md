@@ -26,6 +26,15 @@ machines, use `make OPT="-O3 -g"`.
 
 ## Usage
 
+### Watch the trained robot
+
+```sh
+uv run python scripts/enjoy.py models/leaper --difficulty 0.6
+```
+
+`models/leaper` is a trained policy that comes with the repository (see
+[Results](#results)).
+
 ### Look at the physics
 
 ```sh
@@ -44,7 +53,8 @@ uv run python scripts/train.py --name terrain --steps 40e6
 This starts on flat ground and makes the terrain harder as the robot gets
 better. Use `--difficulty 0` to train on flat ground only. The run is saved
 in `runs/terrain/`, with checkpoints every 2M steps. To train it for
-`--steps` more steps, add `--resume runs/terrain` to the same command.
+`--steps` more steps, add `--resume runs/terrain` to the same command; a
+resumed run fine-tunes the policy, with a learning rate that decays to 0.
 Follow training with `uv run tensorboard --logdir runs`.
 
 Training uses half of the CPU cores by default (`--threads`); on most
@@ -56,6 +66,8 @@ machines that is one thread per physical core, which is the fastest setting.
 uv run python scripts/enjoy.py runs/terrain --difficulty 0.6
 uv run python scripts/enjoy.py runs/terrain --record out/terrain.gif
 ```
+
+Given a run directory, `enjoy.py` plays its checkpoint with the most steps.
 
 ### Measure a policy
 
@@ -105,23 +117,38 @@ Drag with the left mouse button to orbit the camera; scroll to zoom.
 
 ## Results
 
-`runs/leaper1` was trained from scratch for 26M steps (about 30 minutes on
-8 cores of a Ryzen 7 8840U laptop). With `scripts/evaluate.py` (64 episodes
-of 33 s per difficulty):
+`models/leaper` was trained from scratch with the default settings for 60M
+steps, then fine-tuned with `--resume` for 15M more at `--lr 3e-4`
+(about 50 minutes in all on 8 cores of a Ryzen 7 8840U laptop):
+
+```sh
+uv run python scripts/train.py --name leaper --steps 60e6
+uv run python scripts/train.py --name leaper --steps 15e6 --lr 3e-4 --resume runs/leaper
+```
+
+With `scripts/evaluate.py --envs 512` (512 episodes of 33 s per difficulty):
 
 | difficulty | checkpoints/min | stalled | falls |
 |-----------:|----------------:|--------:|------:|
-| 0.00       | 23.0            | 0%      | 0%    |
-| 0.25       | 23.6            | 0%      | 0%    |
-| 0.50       | 23.7            | 0%      | 0%    |
-| 0.75       | 23.8            | 0%      | 3%    |
-| 1.00       | 23.5            | 0%      | 3%    |
+| 0.00       | 24.3            | 0%      | 0.0%  |
+| 0.25       | 24.4            | 0%      | 0.0%  |
+| 0.50       | 24.5            | 0%      | 0.2%  |
+| 0.75       | 24.4            | 0%      | 0.2%  |
+| 1.00       | 24.0            | 0%      | 2.1%  |
 
-The robot keeps the checkpoint in view for over 90% of the distance it
-walks. This run was trained when walls surrounded the arena. In the void
-arena it never walks off the edge, and it falls about as often as before.
+The fine-tuning matters: after the first 60M steps, the robot fell in 4.3%
+of the episodes at difficulty 1.
 
-On the same laptop, training runs at about 15-22k steps per second.
+The default settings came out of a sweep of 3M-step runs (under 3 minutes
+each), judged on how reliably and how soon training takes off, and on
+checkpoints and falls at the end. Compared with the previous settings,
+8 minibatches instead of 4, a learning rate of 6e-4 instead of 3e-4, and a
+fall penalty of 20 instead of 10 made training take off on every seed
+(after about 0.6M steps) instead of on half of them, and train about 20%
+faster. More epochs, more envs per update, a smaller network, or a lower
+target KL were all slower to converge.
+
+On the same laptop, training runs at about 25k steps per second.
 `make bench` and `scripts/bench_env.py` measure the raw simulation speed.
 
 ## Project layout
@@ -137,6 +164,7 @@ On the same laptop, training runs at about 15-22k steps per second.
   environments for Stable Baselines3 and Gymnasium (`env.py`, registered as
   `Arc-v0`), and saving and loading training runs (`runs.py`).
 - `scripts/`: training, playback, evaluation, and benchmarking.
+- `models/leaper/`: the trained policy described in [Results](#results).
 - `tests/`: Python tests for the environment and rewards.
 
 The physics uses substepped XPBD

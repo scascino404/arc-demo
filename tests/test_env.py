@@ -241,3 +241,14 @@ def test_checkpoint_counts_only_when_seen():
     env.step(np.zeros((1, 12), dtype=np.float32))
     assert task.checkpoints[0] == 1
     env.close()
+
+
+def test_latest_checkpoint(tmp_path):
+    from arc.runs import MODEL, latest_checkpoint
+    assert latest_checkpoint(tmp_path) == tmp_path  # no checkpoints: the run itself
+    for steps in (2_000_000, 10_000_000, 4_000_000):
+        (tmp_path / "checkpoints" / f"step_{steps}").mkdir(parents=True)
+        (tmp_path / "checkpoints" / f"step_{steps}" / MODEL).touch()
+    (tmp_path / "checkpoints" / "step_99000000").mkdir()  # no model: ignored
+    assert latest_checkpoint(tmp_path) == tmp_path / "checkpoints" / "step_10000000"
+    assert latest_checkpoint(tmp_path / "checkpoints") == tmp_path / "checkpoints" / "step_10000000"
