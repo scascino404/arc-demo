@@ -301,6 +301,28 @@ static void test_set_pose(void)
         check_near("angle read back", arc_joint_angle(&w, &w.joints[i]), angles[i], 1e-9);
 }
 
+/* A blown-up state must be flagged, not crash or invoke undefined behaviour
+ * (run under -fsanitize=undefined to check the latter). */
+static void test_blow_up(void)
+{
+    arc_world w;
+    double bad[3];
+    int i;
+    printf("blow-up\n");
+    bad[0] = 1e12;
+    bad[1] = -1e300;
+    bad[2] = sqrt(-1.0); /* NaN */
+    for (i = 0; i < 3; ++i) {
+        arc_world_init(&w);
+        arc_terrain_flat(&w.terrain, 8, 8, 0.5, 0.0);
+        arc_add_body(&w, 1.0, arc_inertia_sphere(1.0, 0.1), v3(bad[i], 0.0, 0.05), q_identity());
+        arc_add_sphere(&w, 0, v3(0, 0, 0), 0.1);
+        arc_world_step(&w, DT, SUBSTEPS);
+        check(w.unstable, "flagged unstable", w.unstable, 1);
+        check_near("height lookup outside", arc_terrain_height(&w.terrain, bad[i], bad[i]), 0.0, 0.0);
+    }
+}
+
 int main(void)
 {
     test_free_fall();
@@ -313,5 +335,6 @@ int main(void)
     test_sliding();
     test_blocks();
     test_set_pose();
+    test_blow_up();
     return check_summary();
 }

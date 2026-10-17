@@ -18,6 +18,7 @@
 
 #define ARC_MAX_SPEED 60.0      /* m/s; beyond this the world is flagged unstable */
 #define ARC_MAX_SPIN 400.0      /* rad/s */
+#define ARC_MAX_DISTANCE 1e6    /* m from the origin; also keeps cell indices in int range */
 
 /* The solver helpers take and return vec3 by value. Inlined, those stay in
  * registers; as calls they go through stack copies that defeat store-to-load
@@ -545,11 +546,18 @@ static void collide_sphere(arc_world *w, arc_sphere *s, double h)
     double rad = s->radius, ln = 0.0;
     vec3 c = v3_add(b->x, body_rotate(b, s->pos)), n_max = v3(0.0, 0.0, 1.0);
     double depth_max = 0.0;
-    int ix0 = (int)floor((c.x - rad - t->ox) / t->cell);
-    int ix1 = (int)floor((c.x + rad - t->ox) / t->cell);
-    int iy0 = (int)floor((c.y - rad - t->oy) / t->cell);
-    int iy1 = (int)floor((c.y + rad - t->oy) / t->cell);
-    int ix, iy, sx, sy, touched = 0;
+    int ix0, ix1, iy0, iy1, ix, iy, sx, sy, touched = 0;
+
+    /* a blown-up state (NaN or far off) must not reach the int conversions;
+     * check_stability flags the world at the end of the step */
+    if (!(fabs(c.x) < ARC_MAX_DISTANCE && fabs(c.y) < ARC_MAX_DISTANCE)) {
+        s->anchored = 0;
+        return;
+    }
+    ix0 = (int)floor((c.x - rad - t->ox) / t->cell);
+    ix1 = (int)floor((c.x + rad - t->ox) / t->cell);
+    iy0 = (int)floor((c.y - rad - t->oy) / t->cell);
+    iy1 = (int)floor((c.y + rad - t->oy) / t->cell);
 
     for (iy = iy0; iy <= iy1; ++iy) {
         for (ix = ix0; ix <= ix1; ++ix) {
@@ -689,7 +697,8 @@ static void check_stability(arc_world *w)
     for (i = 0; i < w->n_bodies; ++i) {
         arc_body *b = &w->bodies[i];
         double v2 = v3_len2(b->v), w2 = v3_len2(b->w);
-        if (!is_finite(v2) || !is_finite(w2) || !is_finite(b->x.x + b->x.y + b->x.z)
+        if (!is_finite(v2) || !is_finite(w2)
+            || !(v3_len2(b->x) < ARC_MAX_DISTANCE * ARC_MAX_DISTANCE) /* also NaN */
             || v2 > ARC_MAX_SPEED * ARC_MAX_SPEED || w2 > ARC_MAX_SPIN * ARC_MAX_SPIN)
             w->unstable = 1;
     }
